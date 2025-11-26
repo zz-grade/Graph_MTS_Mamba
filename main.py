@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 import argparse
 from datetime import datetime
+
+from huggingface_hub.utils import experimental
 from torch_geometric.datasets import KarateClub
 import os
 
@@ -31,6 +33,12 @@ parser.add_argument('--home_path', default=home_dir, type=str,
 
 
 def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug2):
+    device = torch.device(args.device)
+    experiment_description = args.experiment_description
+
+    method = 'GCC'
+    
+
     data_generator("/data/user_zhangzhe/data/FingerMovements", configs, args)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
