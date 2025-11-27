@@ -3,13 +3,13 @@ import torch.nn.functional as F
 import argparse
 from datetime import datetime
 
-from models.some_model import Base_model
+from models.primary_model import Base_model
 from utils import _logger, set_requires_grad
 from huggingface_hub.utils import experimental
 from torch_geometric.datasets import KarateClub
 import os
 
-from graph_mamba.GraphMambaNet import GraphMambaNet
+from models.GraphMamba import GraphMambaNet
 from loader_data.Gnn_dataloader import data_generator
 
 
@@ -67,6 +67,10 @@ def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug
     logger.debug("Data loaded ...")
 
     model = Base_model(configs, args).to(device)
+
+    model_optimizer = torch.optim.Adam(model.parameters(), lr=configs.lr, betas=(configs.beta1, configs.beta2),
+                                       weight_decay=3e-4)
+
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)

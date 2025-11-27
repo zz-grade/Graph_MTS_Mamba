@@ -1,7 +1,7 @@
 import torch.nn as nn
 import torch
 
-from graph_construction.Graph_construction import Feature_extractor_1DCNN_RUL
+from models.Graph_construction import Feature_extractor_1DCNN_RUL
 
 
 class Base_model(nn.Module):
@@ -24,3 +24,15 @@ class Base_model(nn.Module):
 
     def forward(self, X, self_supervised = False, num_remain = None):
         b_samples, time_length, num_node, dimension = X.size()
+
+
+def Trainer(model, temporal_contr_model, model_optimizer, temp_cont_optimizer, train_dl, test_dl, device, logger, config, experiment_log_dir, training_mode, lambda1, lambda2, lambda3,
+            num_remain_aug1, num_remain_aug2):
+    logger.debug("Training started ....")
+    criterion = nn.CrossEntropyLoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(model_optimizer, 'min')
+    loss = []
+    for epoch in range(1, config.num_epoch + 1):
+        train_loss, train_acc, train_loss_details = model_train
+
+
