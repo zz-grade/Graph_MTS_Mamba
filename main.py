@@ -3,6 +3,8 @@ import torch.nn.functional as F
 import argparse
 from datetime import datetime
 
+from models.some_model import Base_model
+from utils import _logger, set_requires_grad
 from huggingface_hub.utils import experimental
 from torch_geometric.datasets import KarateClub
 import os
@@ -35,11 +37,36 @@ parser.add_argument('--home_path', default=home_dir, type=str,
 def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug2):
     device = torch.device(args.device)
     experiment_description = args.experiment_description
-
     method = 'GCC'
-    
+    training_mode = args.training_mode
+    run_description = args.run_description
+    logs_save_dir = args.logs_save_dir
+    os.makedirs(logs_save_dir, exist_ok = True)
 
-    data_generator("/data/user_zhangzhe/data/FingerMovements", configs, args)
+    SEED = args.seed
+    torch.manual_seed(SEED)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = False
+
+    experiment_log_dir = os.path.join(logs_save_dir, experiment_description, run_description,
+                                      training_mode + f"_seed_{SEED}")
+    os.makedirs(experiment_log_dir, exist_ok=True)
+
+    log_file_name = os.path.join(experiment_log_dir, f"logs_{datetime.now().strftime('%d_%m_%Y_%H_%M_%S')}.log")
+    logger = _logger(log_file_name)
+    logger.debug("=" * 45)
+    logger.debug(f'Dataset: {data_type}')
+    logger.debug(f'Method:  {method}')
+    logger.debug(f'Mode:    {training_mode}')
+    logger.debug("=" * 45)
+
+
+    data_path = f"./data/{data_type}"
+    train_dl, test_dl = data_generator("/data/user_zhangzhe/data/FingerMovements", configs, args)
+
+    logger.debug("Data loaded ...")
+
+    model = Base_model(configs, args).to(device)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
