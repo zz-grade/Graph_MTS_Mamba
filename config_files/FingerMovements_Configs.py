@@ -7,7 +7,7 @@ class Config(object):
         self.window_size = 5
         self.time_denpen_len = 10
 
-        self.convo_time_length = 8
+        self.convo_time_length = 5
         # self.features_len = 18
 
 
@@ -56,6 +56,8 @@ class Config(object):
         self.max_hop = 2
         self.ran_num = 4
         self.repeat_sample = 4
+
+        self.show_interval = 2
 
 
 class augmentations(object):
