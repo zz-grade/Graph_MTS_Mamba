@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import argparse
 from datetime import datetime
-
+import numpy as np
 from models.primary_model import Base_model
 from utils import _logger, set_requires_grad
 from huggingface_hub.utils import experimental
@@ -47,6 +47,7 @@ def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug
     torch.manual_seed(SEED)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = False
+    np.random.seed(SEED)
 
     experiment_log_dir = os.path.join(logs_save_dir, experiment_description, run_description,
                                       training_mode + f"_seed_{SEED}")

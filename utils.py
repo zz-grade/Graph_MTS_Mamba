@@ -29,35 +29,6 @@ def epoch_time(start_time, end_time):
     return elapsed_mins, elapsed_secs
 
 
-def _calc_metrics(pred_labels, true_labels, log_dir, home_path):
-    pred_labels = np.array(pred_labels).astype(int)
-    true_labels = np.array(true_labels).astype(int)
-
-    # save targets
-    labels_save_path = os.path.join(log_dir, "labels")
-    os.makedirs(labels_save_path, exist_ok=True)
-    np.save(os.path.join(labels_save_path, "predicted_labels.npy"), pred_labels)
-    np.save(os.path.join(labels_save_path, "true_labels.npy"), true_labels)
-
-    r = classification_report(true_labels, pred_labels, digits=6, output_dict=True)
-    cm = confusion_matrix(true_labels, pred_labels)
-    df = pd.DataFrame(r)
-    df["cohen"] = cohen_kappa_score(true_labels, pred_labels)
-    df["accuracy"] = accuracy_score(true_labels, pred_labels)
-    df = df * 100
-
-    # save classification report
-    exp_name = os.path.split(os.path.dirname(log_dir))[-1]
-    training_mode = os.path.basename(log_dir)
-    file_name = f"{exp_name}_{training_mode}_classification_report.xlsx"
-    report_Save_path = os.path.join(home_path, log_dir, file_name)
-    df.to_excel(report_Save_path)
-
-    # save confusion matrix
-    cm_file_name = f"{exp_name}_{training_mode}_confusion_matrix.torch"
-    cm_Save_path = os.path.join(home_path, log_dir, cm_file_name)
-    torch.save(cm, cm_Save_path)
-
 
 def _logger(logger_name, level=logging.DEBUG):
     """
@@ -81,16 +52,7 @@ def _logger(logger_name, level=logging.DEBUG):
 
 
 
-
-
 def copy_Files(destination, data_type):
     destination_dir = os.path.join(destination, "model_files")
     os.makedirs(destination_dir, exist_ok=True)
-    copy("main_GNN_batch.py", os.path.join(destination_dir, "main_GNN_batch.py"))
-    copy("trainer/trainer_GNN.py", os.path.join(destination_dir, "trainer_GNN.py"))
-    copy(f"config_files/{data_type}_Configs.py", os.path.join(destination_dir, f"{data_type}_Configs.py"))
-    copy("dataloader/augmentations.py", os.path.join(destination_dir, "augmentations.py"))
-    copy("dataloader/dataloader_GNN.py", os.path.join(destination_dir, "dataloader_GNN.py"))
-    copy(f"models/model_GNN_CNN.py", os.path.join(destination_dir, f"model_GNN_CNN.py"))
-    copy("models/loss_GNN.py", os.path.join(destination_dir, "loss_GNN.py"))
-    copy("models/TC_GNN.py", os.path.join(destination_dir, "TC_GNN.py"))
+    copy("main_GNN_batch.py", os.path.join(destination_dir, "main.py"))

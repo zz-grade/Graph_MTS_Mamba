@@ -2,6 +2,7 @@ import torch.nn as nn
 import torch
 from sympy import totient
 
+from models.GraphMamba import GraphMambaGMN
 from models.Graph_construction import Feature_extractor_1DCNN_RUL, Dot_Graph_Construction
 from models.augmentation import disturbance_correlations
 
@@ -18,38 +19,30 @@ class Base_model(nn.Module):
         self.hidden_dim = configs.hidden_channels
         self.output_dim = configs.final_out_channels
         self.time_length = configs.convo_time_length
-        self.Time_Graph_contrustion = Feature_extractor_1DCNN_RUL(configs.window_size, 32,configs.hidden_channels,
+        self.Time_Graph_contrustion = Feature_extractor_1DCNN_RUL(configs.window_size, 32, configs.hidden_channels,
                                                                   configs.kernel_size, configs.stride, configs.dropout)
-        #self.Graph_Mamba =
-        self.logits = nn.Linear(configs.convo_time_length * configs.final_out_channels * configs.num_nodes, configs.num_classes)
+        self.Graph_Mamba = GraphMambaGMN(configs.hidden_channels, configs.dimension_token, configs.dimension_state,
+                                         configs.num_local_layers, configs.num_global_layers, configs.max_hop, configs.ran_num,
+                                         configs.repeat_sample, configs.use_mpnn)
+        self.logits = nn.Linear(configs.convo_time_length * configs.final_out_channels * configs.num_nodes,
+                                configs.num_classes)
 
-
-    def forward(self, data, self_supervised = False, num_remain = None):
-        b_samples, time_length, num_nodes, dimension = data.size()# Size of data is (bs, time_length, num_nodes, dimension)
-        data = torch.transpose(data, 2, 1) # (b_samples, num_nodes, time_length, dimension)
-        data = torch.reshape(data, [b_samples*num_nodes, time_length, dimension])
+    def forward(self, data, self_supervised=False, num_remain=None):
+        b_samples, time_length, num_nodes, dimension = data.size()  # Size of data is (bs, time_length, num_nodes, dimension)
+        data = torch.transpose(data, 2, 1)  # (b_samples, num_nodes, time_length, dimension)
+        data = torch.reshape(data, [b_samples * num_nodes, time_length, dimension])
         data = self.nonlin_map(data)
         TS_input = torch.transpose(data, 1, 2)
-        TS_output = self.Time_Graph_contrustion(TS_input) # size is (bs, out_dimension*num_node, tlen)
-        TS_output = torch.transpose(TS_output, 1, 2) # size is (bs, tlen, out_dimension*num_node
+        TS_output = self.Time_Graph_contrustion(TS_input)  # size is (bs, out_dimension*num_node, tlen)
+        TS_output = torch.transpose(TS_output, 1, 2)  # size is (bs, tlen, out_dimension*num_node
 
         GC_input = torch.reshape(TS_output, [b_samples, -1, num_nodes, self.hidden_dim])
-        GC_input = torch.reshape(GC_input, [-1, num_nodes, self.hidden_dim])
         Adj_input = Dot_Graph_Construction(GC_input)
         Adj_input = disturbance_correlations(Adj_input, num_remain)
-
-        GC_output = self.logits()
+        GC_input = torch.reshape(GC_input, [-1, num_nodes, self.hidden_dim])
+        GC_output = self.Graph_Mamba(GC_input, Adj_input)
         GC_output = torch.reshape(GC_output, [b_samples, -1, num_nodes, self.output_dim])
         logits_input = torch.reshape(GC_input, [b_samples, -1])
         logits = self.logits(logits_input)
 
         return logits, GC_output
-
-
-
-
-
-
-
-
-

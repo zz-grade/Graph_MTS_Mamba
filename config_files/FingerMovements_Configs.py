@@ -45,6 +45,18 @@ class Config(object):
         self.TC = TC()
         self.augmentation = augmentations()
 
+        self.dimension_token = 64
+        self.dimension_state = 64
+        self.dimension_conv = 4
+        self.expand = 2
+        self.num_local_layers = 1
+        self.num_global_layers = 1
+        self.use_mpnn = 0
+
+        self.max_hop = 2
+        self.ran_num = 4
+        self.repeat_sample = 4
+
 
 class augmentations(object):
     def __init__(self):

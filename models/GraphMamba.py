@@ -3,9 +3,139 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from mamba_ssm import Mamba
+from torch_geometric.data.remote_backend_utils import num_nodes
 from torch_geometric.datasets import KarateClub
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import degree
+
+from trainer.Token_Create import precompute_graph_and_tokens
+
+
+class GraphMambaGMN(nn.Module):
+    def __init__(self, configs, args):
+        super().__init__()
+        d_model = configs.dimension_token
+        self.subgraph_encoder = nn.Sequential(
+            nn.Linear(configs.hidden_channels, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.local_mamba = nn.ModuleList([
+            BidirectionalMamba()
+            for _ in range(configs.num_local_layers)
+        ])
+        self.global_mamba = nn.ModuleList([
+            BidirectionalMamba()
+            for _ in range(configs.num_global_layers)
+        ])
+        if configs.use_mpnn:
+            self.mpnn = MPNN_nk(d_model, d_model)
+        else:
+            self.mpnn = None
+
+        self.num_nodes = None
+        self.adj_list = None
+        self.edge_index = None  # (2, E)
+        self.tokens_per_node = None
+        self.perm = None  # 度排序
+        self.inv_perm = None
+
+
+    def _encode_subgraph_tokens_batched(self, x):
+        b_samples, num_nodes, _ = x.size()
+        device = x.device
+        l_token = len(self.tokens_per_node[0])
+        node_token_feats = torch.zeros(b_samples, num_nodes, l_token, self.d_model, device=device)
+        for v in range(num_nodes):
+            tokens_v = self.tokens_per_node[v]
+            for t, node_ids in enumerate(tokens_v):
+                idx = torch.tensor(node_ids, dtype=torch.long, device=device)
+                sub_x = x[:, idx, :] # (k, in_dim)
+                pooled = sub_x.mean(dim=1) # (in_dim)
+                node_token_feats[:, v, t, :] = self.subgraph_encoder(pooled)
+        return node_token_feats
+
+
+
+    def forward(self, x, adj):
+        device = x.device
+        if self.tokens_per_node is None:
+            self.num_nodes, self.adj_list, self.edge_index, self.tokens_per_node, self.perm, self.inv_perm = precompute_graph_and_tokens(adj)
+        b_samples, num_nodes, _ = x.size()
+        perm = self.perm.to(device)
+        inv_perm = self.inv_perm.to(device)
+        node_token_feats = self._encode_subgraph_tokens_batched(x)
+        b_samples, num_nodes, time_length, dimension = node_token_feats.size()
+        h = node_token_feats(b_samples * num_nodes, time_length, dimension)
+        for layer in self.local_mamba:
+            h = layer(h)
+        node_repr_all = h[:, -1, :] # (B*N, D)
+        node_repr = node_repr_all.view(b_samples, num_nodes, dimension)
+        node_seq_sorted = node_repr[:, perm, :]
+        h_global = node_seq_sorted
+        for layer in self.global_mamba:
+            h_global = layer(h_global)
+
+        node_repr_global = h_global[:, inv_perm, :] # (B, N, D)
+        if self.use_mpnn and self.mpnn is not None:
+            edge_index = self.edge_index.to(device)
+            mpnn_out = self.mpnn(node_repr_global, edge_index)
+            node_repr_global = node_repr_global + F.relu(mpnn_out)
+
+        return node_repr_global
+
+
+
+
+
+class BidirectionalMamba(nn.Module):
+    def __init__(self, configs):
+        super().__init__()
+        self.fwd = Mamba(
+            d_model = configs.dimension_token,
+            d_state = configs.dimension_state,
+            d_conv = configs.dimension_conv,
+            expand = configs.expand
+        )
+
+        self.bwd = Mamba(
+            d_model = configs.dimension_token,
+            d_state = configs.dimension_state,
+            d_conv = configs.dimension_conv,
+            expand = configs.expand
+        )
+        self.norm = nn.LayerNorm(configs.dimension_token)
+
+    def forward(self, x):
+        x_norm = self.norm(x)
+        y_fwd = self.fwd(x_norm)
+        x_rev = torch.flip(x_norm, dims=[1])
+        y_bwd_rev = self.bwd(x_rev)
+        y_bwd = torch.flip(y_bwd_rev, dims=[1])
+
+        y = 0.5 * (y_fwd + y_bwd)
+        return y
+
+
+
+
+class MPNN_nk(nn.Module):
+    def __init__(self, in_fea, out_fea):
+        super().__init__()
+        self.lin_self = nn.Linear(in_fea, out_fea)
+        self.lin_neig = nn.Linear(in_fea, out_fea)
+
+    def forward(self, curr_fea, edge_index):
+        num_nodes, dimension = curr_fea.size()
+        device = curr_fea.device()
+        src, dst = edge_index
+        src_all = torch.cat([src, dst], dim=0)
+        dst_all = torch.cat([dst, src], dim=0)
+        nei_sum = torch.zeros(num_nodes, dimension, device=device)
+        nei_sum.index_add_(0, dst_all, curr_fea[src_all])
+        out_fea = self.lin_self(curr_fea) + self.lin_neig(nei_sum)
+        return out_fea
+
 
 
 class GraphMambaLayer(nn.Module):
@@ -147,3 +277,22 @@ class GraphMambaNet(nn.Module):
         # 节点分类：对每个节点输出一个 logits
         out = self.head(x)  # [N, num_classes]
         return out
+
+
+
+class BidirectionalMamba(nn.Module):
+    def __init__(self, d_model: int, d_state: int = 64, d_conv: int = 4):
+        super().__init__()
+        # 正向 / 反向各一个 Mamba
+        self.fwd = Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv)
+        self.bwd = Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y_fwd = self.fwd(x)          # (B, L, d_model)
+
+        x_rev = torch.flip(x, dims=[1])
+        y_bwd_rev = self.bwd(x_rev)  # (B, L, d_model)
+        y_bwd = torch.flip(y_bwd_rev, dims=[1])
+
+        # 简单平均聚合前向/反向
+        return 0.5 * (y_fwd + y_bwd)
