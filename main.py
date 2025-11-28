@@ -4,12 +4,11 @@ import argparse
 from datetime import datetime
 import numpy as np
 from models.primary_model import Base_model
+from trainer.train_Graph_MTS import Trainer
 from utils import _logger, set_requires_grad
 from huggingface_hub.utils import experimental
 from torch_geometric.datasets import KarateClub
 import os
-
-from models.GraphMamba import GraphMambaNet
 from loader_data.Gnn_dataloader import data_generator
 
 
@@ -76,34 +75,8 @@ def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    # 载入 KarateClub 数据集（一个图，34 个节点）:contentReference[oaicite:4]{index=4}
-    dataset = KarateClub()
-    data = dataset[0].to(device)
+    Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, args)
 
-    # 单图场景手动加上 batch
-    if not hasattr(data, "batch"):
-        data.batch = torch.zeros(data.num_nodes, dtype=torch.long, device=device)
-
-    model = GraphMambaNet(
-        in_channels=dataset.num_features,
-        hidden_channels=64,
-        out_channels=dataset.num_classes,
-    ).to(device)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-    model.train()
-    for epoch in range(1, 201):
-        optimizer.zero_grad()
-        out = model(data)          # [N, num_classes]
-        loss = F.cross_entropy(out, data.y)  # 这里偷懒，直接全节点都当作训练样本
-        loss.backward()
-        optimizer.step()
-
-        if epoch % 20 == 0:
-            pred = out.argmax(dim=-1)
-            acc = (pred == data.y).float().mean().item()
-            print(f"Epoch {epoch:03d} | Loss {loss.item():.4f} | Acc {acc:.4f}")
 
 
 
@@ -128,9 +101,5 @@ if __name__ == '__main__':
     num_remain_aug2 = 2
 
     for j in range(10):
-        args.training_mode = 'self_supervised'
-        main(configs, args, default_lambda1, default_lambda2, default_lambda3, num_remain_aug1, num_remain_aug2)
-        args.training_mode = 'train_linear'
         main(configs, args, default_lambda1, default_lambda2, default_lambda3, num_remain_aug1, num_remain_aug2)
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/

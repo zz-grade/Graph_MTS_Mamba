@@ -46,6 +46,7 @@ class Load_Training_Data(Dataset):
         x_train = dataset['samples']
         y_train = dataset['labels']
 
+
         if configs.wavelet_aug:
             x_train_aug1 = x_train.numpy()
             x_train_aug2 = x_train.numpy()
@@ -68,19 +69,17 @@ class Load_Training_Data(Dataset):
             self.x_data_aug2 = x_train_aug2.float()
             self.y_data = y_train.long()
 
-        self.len = x_train.shape[0]
+        if self.x_data.shape[0] != self.y_data.shape[0]:
+            print("x_data len:", self.x_data.shape[0])
+            print("y_data len:", self.y_data.shape[0])
+            raise ValueError("samples 和 labels 数量不一致！")
+        self.len = self.x_data.shape[0]
         shape = self.x_data.size()
         self.x_data = self.x_data.reshape(shape[0], shape[1], configs.time_denpen_len, configs.window_size)
-        self.x_data = torch.transpose(self.x_data, 0, 1)
-
-        self.x_data_aug1 = self.x_data_aug1.reshape(shape[0], shape[1], configs.time_denpen_len, configs.window_size)
-        self.x_data_aug1 = torch.transpose(self.x_data_aug1, 1, 2)
-
-        self.x_data_aug2 = self.x_data_aug2.reshape(shape[0], shape[1], configs.time_denpen_len, configs.window_size)
-        self.x_data_aug2 = torch.transpose(self.x_data_aug2, 1, 2)
+        self.x_data = torch.transpose(self.x_data, 1, 2)
 
     def __getitem__(self, index):
-        return self.x_data[index], self.y_data[index],self.x_data_aug1[index],self.x_data_aug2[index]
+        return self.x_data[index], self.y_data[index]
 
     def __len__(self):
         return self.len

@@ -1,8 +1,8 @@
-from random import random
+import random
 
 import torch
 
-def precompute_graph_and_tokens(adj, args):
+def precompute_graph_and_tokens(adj, seed):
     adj = adj.detach().cpu()
     num_nodes = adj.size(0)
 
@@ -27,7 +27,7 @@ def precompute_graph_and_tokens(adj, args):
     inv_perm = torch.empty_like(perm)
     inv_perm[perm] = torch.arange(num_nodes, dtype=torch.long)
 
-    rng = random.Random(args.seed) if args.seed is not None else random
+    rng = random.Random(seed) if seed is not None else random
     tokens_per_node = _sample_tokens_for_all_nodes(num_nodes, adj_list, rng)
 
     return num_nodes, adj_list, edge_index, tokens_per_node, perm, inv_perm
@@ -35,18 +35,25 @@ def precompute_graph_and_tokens(adj, args):
 
 
 def _build_adj_list_from_matrix(adj):
-    num_nodes = adj.size()
-    adj_list = [[] for _ in range(num_nodes)]
-    rows, cols = (adj != 0).nonzero(as_tuple=True)
-    for u, v in zip(rows.tolist(), cols.tolist()):
-        adj_list[u].append(v)
+    num_nodes = adj.size(0)
+    adj_list = []
+    for i in range(num_nodes):
+        row = adj[i]
+        indices_tensor = (row != 0).nonzero(as_tuple=False).view(-1)
+        indices_list = indices_tensor.tolist()
+        adj_list.append(indices_list)
     return adj_list
 
 
 
 def _build_edge_index_from_matrix(adj):
-    edges = (adj != 0).nonzero(as_tuple=False) # (E, 2)
-    edge_index = edges.t().contiguous() # (2, E)
+    edges = (adj != 0).nonzero(as_tuple=False)  # (E, 2)
+
+    if edges.numel() == 0:
+        edge_index = torch.empty(2, 0, dtype=torch.long)
+    else:
+        edge_index = edges.t().contiguous().long()  # (2, E)
+
     return edge_index
 
 

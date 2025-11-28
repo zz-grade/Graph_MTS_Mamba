@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as fun
 import copy
 
+
 class transformer_construction(nn.Module):
     def __init__(self, input_dimension, hidden_dimension, num_heads):
         super(transformer_construction, self).__init__()
@@ -14,7 +15,6 @@ class transformer_construction(nn.Module):
         for i in range(num_heads):
             self.Query_lists.append(nn.Linear(input_dimension, hidden_dimension))
             self.Key_lists.append(nn.Linear(input_dimension, hidden_dimension))
-
 
     def forward(self, X):
         relation_lists = []
@@ -33,38 +33,41 @@ class transformer_construction(nn.Module):
         return relation_lists
 
 
-class Feature_extractor_1DCNN_RUL(nn.Module):
-    def __init__(self, input_channels, num_hidden, out_dim, kernel_size=3, stride=1, dropout=0):
-        super(Feature_extractor_1DCNN_RUL, self).__init__()
+class Feature_extractor_1DCNN_Tiny(nn.Module):
+    def __init__(self, input_channels, num_hidden, out_dim, kernel_size=3, stride=1, dropout=0.35):
+        super(Feature_extractor_1DCNN_Tiny, self).__init__()
 
         self.conv_block1 = nn.Sequential(
             nn.Conv1d(input_channels, num_hidden, kernel_size=kernel_size,
                       stride=stride, bias=False, padding=(kernel_size // 2)),
             nn.BatchNorm1d(num_hidden),
             nn.ReLU(),
-            # nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
             nn.Dropout(dropout)
         )
 
         self.conv_block2 = nn.Sequential(
-            nn.Conv1d(num_hidden, out_dim, kernel_size=kernel_size, stride=1, bias=False, padding=1),
+            nn.Conv1d(num_hidden, num_hidden * 2, kernel_size=kernel_size, stride=1, bias=False, padding=1),
             nn.BatchNorm1d(out_dim),
             nn.ReLU(),
             # nn.MaxPool1d(kernel_size=2, stride=2, padding=1)
         )
 
+        self.conv_block3 = nn.Sequential(
+            nn.Conv1d(num_hidden * 2, out_dim, kernel_size=kernel_size, stride=1, bias=False, padding=2),
+            nn.BatchNorm1d(out_dim),
+            nn.ReLU(),
+            # nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+        )
+
     def forward(self, x_in):
         # print('input size is {}'.format(x_in.size()))
         ### input dim is (bs, tlen, feature_dim)
-        x = torch.transpose(x_in, -1, -2)
 
-        x = self.conv_block1(x)
-        x = self.conv_block2(x)
+        x_in = self.conv_block1(x_in)
+        x = self.conv_block2(x_in)
 
         return x
-
-
-
 
 
 def Dot_Graph_Construction(node_features):
@@ -78,12 +81,34 @@ def Dot_Graph_Construction(node_features):
 
     eyes_like = torch.eye(N).repeat(bs, 1, 1).cuda()
 
-    eyes_like_inf = eyes_like*1e8
+    eyes_like_inf = eyes_like * 1e8
 
-    Adj = fun.leaky_relu(Adj-eyes_like_inf)
+    Adj = fun.leaky_relu(Adj - eyes_like_inf)
 
-    Adj = fun.softmax(Adj, dim = -1)
+    Adj = fun.softmax(Adj, dim=-1)
 
-    Adj = Adj+eyes_like
+    Adj = Adj + eyes_like
 
     return Adj
+
+
+def Graph_regularization_loss(X, Adj, gamma):
+    ### X size is (bs, N, dimension)
+    ### Adj size is (bs, N, N)
+    X_0 = X.unsqueeze(-3)
+    X_1 = X.unsqueeze(-2)
+
+    X_distance = torch.sum((X_0 - X_1)**2, -1)
+
+    Loss_GL_0 = X_distance*Adj
+    Loss_GL_0 = torch.mean(Loss_GL_0)
+
+    Loss_GL_1 = torch.sqrt(torch.mean(Adj**2))
+    # print('Loss GL 0 is {}'.format(Loss_GL_0))
+    # print('Loss GL 1 is {}'.format(Loss_GL_1))
+
+
+    Loss_GL = Loss_GL_0 + gamma*Loss_GL_1
+
+
+    return Loss_GL

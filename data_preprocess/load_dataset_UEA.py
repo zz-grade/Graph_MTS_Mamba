@@ -121,7 +121,7 @@ def _load_uea_dataset(dataset, path):
 
     bunch = Bunch(
         data_train=x_train, target_train=y_train,
-        data_test=x_train, target_test=y_test,
+        data_test=x_test, target_test=y_test,
         DESCR=description,
         url=("http://www.timeseriesclassification.com/"
              "description.php?Dataset={}".format(dataset))
@@ -203,7 +203,7 @@ def data_loader(files_name, root):
     data_train = data_normalizaiton(data_train)
     data_test = data_normalizaiton(data_test)
 
-    root_saved_path = './data'
+    root_saved_path = '/data/user_zhangzhe/data'
     if not os.path.exists(os.path.join(root_saved_path, files_name)):
         os.mkdir(os.path.join(root_saved_path, files_name))
 
@@ -222,3 +222,7 @@ def data_loader(files_name, root):
 
 arff_read_UEA = ['ArticularyWordRecognition', 'FingerMovements', 'FaceDetection', 'MotorImagery', 'SelfRegulationSCP1']
 ts_read_UEA = ['SpokenArabicDigits', 'InsectWingbeat', 'CharacterTrajectories']
+
+
+if __name__ == '__main__':
+    data_loader("FingerMovements", "/data/user_zhangzhe/TS_Dataset")
