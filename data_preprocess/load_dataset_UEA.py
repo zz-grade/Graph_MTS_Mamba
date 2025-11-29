@@ -203,7 +203,7 @@ def data_loader(files_name, root):
     data_train = data_normalizaiton(data_train)
     data_test = data_normalizaiton(data_test)
 
-    root_saved_path = '/data/user_zhangzhe/data'
+    root_saved_path = '../data'
     if not os.path.exists(os.path.join(root_saved_path, files_name)):
         os.mkdir(os.path.join(root_saved_path, files_name))
 
@@ -225,4 +225,4 @@ ts_read_UEA = ['SpokenArabicDigits', 'InsectWingbeat', 'CharacterTrajectories']
 
 
 if __name__ == '__main__':
-    data_loader("FingerMovements", "/data/user_zhangzhe/TS_Dataset")
+    data_loader("FingerMovements", "../TS_Dataset")
