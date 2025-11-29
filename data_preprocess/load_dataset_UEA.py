@@ -193,6 +193,8 @@ def data_normalizaiton(data):
 
 
 def data_loader(files_name, root):
+    if not os.path.exists(root):
+        os.mkdir(root)
     if files_name in arff_read_UEA:
         data_train, data_test, label_train, label_test = _load_uea_dataset(files_name, root)
     else:
@@ -204,6 +206,8 @@ def data_loader(files_name, root):
     data_test = data_normalizaiton(data_test)
 
     root_saved_path = '../data'
+    if not os.path.exists(root_saved_path):
+        os.mkdir(root_saved_path)
     if not os.path.exists(os.path.join(root_saved_path, files_name)):
         os.mkdir(os.path.join(root_saved_path, files_name))
 

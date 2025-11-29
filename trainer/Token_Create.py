@@ -35,10 +35,11 @@ def precompute_graph_and_tokens(adj, seed):
 
 
 def _build_adj_list_from_matrix(adj):
-    num_nodes = adj.size(0)
+    adj_cpu = adj.detach().cpu()
+    num_nodes = adj_cpu.size(0)
     adj_list = []
     for i in range(num_nodes):
-        row = adj[i]
+        row = adj_cpu[i]
         indices_tensor = (row != 0).nonzero(as_tuple=False).view(-1)
         indices_list = indices_tensor.tolist()
         adj_list.append(indices_list)
