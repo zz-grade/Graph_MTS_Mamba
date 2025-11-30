@@ -16,6 +16,8 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
         loss = model_train(model, model_optimizer, criterion, train_dl, device)
         if epoch % configs.show_interval == 0:
             accu_val = Cross_validation(model, train_dl, device)
+            # print("cross_accu", cross_accu)
+            # print("accu_val", accu_val)
             if accu_val > cross_accu:
                 cross_accu = accu_val
                 test_accu, prediction, real = Prediction(model, test_dl, device)
@@ -30,7 +32,7 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
 
 def model_train(model, model_optimizer, criterion, train_loader, device):
     model.train()
-    num = int(len(train_loader) * 0.8)
+    num = int(len(train_loader.dataset) * 0.8)
     loss_ = 0
     i = 0
     for data, labels in train_loader:
@@ -40,6 +42,8 @@ def model_train(model, model_optimizer, criterion, train_loader, device):
         data, labels = data.float().to(device), labels.long().to(device)
         model_optimizer.zero_grad()
         prediction = model(data)
+        # print("prediction", prediction)
+        # print("labels", labels)
         loss = criterion(prediction, labels)
         loss.backward()
         model_optimizer.step()
@@ -49,7 +53,7 @@ def model_train(model, model_optimizer, criterion, train_loader, device):
 
 def Cross_validation(model, train_loader, device):
     model.eval()
-    num = int(len(train_loader) * 0.8)
+    num = int(len(train_loader.dataset) * 0.8)
     prediction_ = []
     real_ = []
     i = 0
@@ -64,6 +68,8 @@ def Cross_validation(model, train_loader, device):
     prediction_ = torch.cat(prediction_, 0)
     real_ = torch.cat(real_, 0)
     prediction_ = torch.argmax(prediction_, -1)
+    # print("prediction_", prediction_)
+    # print("real_", real_)
     accu = accu_cal(prediction_, real_)
     return accu
 
