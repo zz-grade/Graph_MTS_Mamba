@@ -87,7 +87,7 @@ def _sample_tokens_for_all_nodes(num_nodes, configs, adj_list, rng):
                     token_nodes = [v]
                 else:
                     node_set = set()
-                    for _ in range(configs.max_hop):
+                    for _ in range(configs.ran_num):
                         path = _random_walk_one(v, hop_len, adj_list, rng)
                         node_set.update(path)
                     if not node_set:
