@@ -48,7 +48,8 @@ def _build_adj_list_from_matrix(adj):
 
 
 def _build_edge_index_from_matrix(adj):
-    edges = (adj != 0).nonzero(as_tuple=False)  # (E, 2)
+    adj_cpu = adj.detach().cpu()
+    edges = (adj_cpu != 0).nonzero(as_tuple=False)  # (E, 2)
 
     if edges.numel() == 0:
         edge_index = torch.empty(2, 0, dtype=torch.long)

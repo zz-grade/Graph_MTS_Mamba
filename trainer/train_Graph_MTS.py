@@ -30,7 +30,7 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
 
 def model_train(model, model_optimizer, criterion, train_loader, device):
     model.train()
-    num = int(len(train_loader) * 0.6)
+    num = int(len(train_loader) * 0.8)
     loss_ = 0
     i = 0
     for data, labels in train_loader:
@@ -49,7 +49,7 @@ def model_train(model, model_optimizer, criterion, train_loader, device):
 
 def Cross_validation(model, train_loader, device):
     model.eval()
-    num = int(len(train_loader) * 0.6)
+    num = int(len(train_loader) * 0.8)
     prediction_ = []
     real_ = []
     i = 0

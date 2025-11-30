@@ -126,11 +126,19 @@ class GraphMambaGMN(nn.Module):
         node_repr_global = torch.gather(h_global, 1, inv_perm_expanded.to(device))  # (B,N,
 
         if self.use_mpnn and self.mpnn is not None:
-            edge_index = self.edge_index.to(device)
-            mpnn_out = self.mpnn(node_repr_global, edge_index)
-            node_repr_global = node_repr_global + F.relu(mpnn_out)
+            new_repr_list = []
+            for b in range(b_samples):
+                h_b = node_repr_global[b]  # (N, D)
+                edge_index_b = edge_index_list[b]
+                if edge_index_b is not None and edge_index_b.numel() > 0:
+                    mpnn_out_b = self.mpnn(h_b, edge_index_b)
+                    new_repr_b = h_b + F.relu(mpnn_out_b)
+                else:
+                    new_repr_b = h_b
+                new_repr_list.append(new_repr_b)
+            node_repr_global = torch.stack(new_repr_list, dim=0)  # (B,N,D)
 
-        node_repr_global = self.proj(node_repr_global)
+        # node_repr_global = self.proj(node_repr_global)
 
         return node_repr_global
 

@@ -58,6 +58,8 @@ class Config(object):
 
         self.show_interval = 2
 
+        self.decay_rate = 0.7
+
 
 class augmentations(object):
     def __init__(self):

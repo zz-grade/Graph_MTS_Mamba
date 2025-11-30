@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as fun
+import time
+import math
 import copy
 
 
@@ -60,14 +62,45 @@ class Feature_extractor_1DCNN_Tiny(nn.Module):
             # nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
         )
 
+        self.positional_encoding = PositionalEncoding(num_hidden, 0.1)
+
     def forward(self, x_in):
         # print('input size is {}'.format(x_in.size()))
         ### input dim is (bs, tlen, feature_dim)
 
+
         x_in = self.conv_block1(x_in)
-        x = self.conv_block2(x_in)
+        x_in = self.conv_block2(x_in)
+        x = self.conv_block3(x_in)
 
         return x
+
+
+class PositionalEncoding(nn.Module):
+    "Implement the PE function."
+
+    def __init__(self, d_model, dropout, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model).cuda()
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) *
+                             -(math.log(100.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+
+        # x = x + torch.Tensor(self.pe[:, :x.size(1)],
+        #                  requires_grad=False)
+        # print(self.pe[0, :x.size(1),2:5])
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
+        # return x
 
 
 def Dot_Graph_Construction(node_features):
@@ -92,6 +125,32 @@ def Dot_Graph_Construction(node_features):
     return Adj
 
 
+
+class Dot_Graph_Construction_weights(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.mapping = nn.Linear(input_dim, input_dim)
+
+    def forward(self, node_features):
+        node_features = self.mapping(node_features)
+        # node_features = F.leaky_relu(node_features)
+        bs, N, dimen = node_features.size()
+
+        node_features_1 = torch.transpose(node_features, 1, 2)
+
+        Adj = torch.bmm(node_features, node_features_1)
+
+        eyes_like = torch.eye(N).repeat(bs, 1, 1).cuda()
+        eyes_like_inf = eyes_like * 1e8
+        Adj = fun.leaky_relu(Adj - eyes_like_inf)
+        Adj = fun.softmax(Adj, dim=-1)
+        # print(Adj[0])
+        Adj = Adj + eyes_like
+        # print(Adj[0])
+        # if prior:
+
+        return Adj
+
 def Graph_regularization_loss(X, Adj, gamma):
     ### X size is (bs, N, dimension)
     ### Adj size is (bs, N, N)
@@ -112,3 +171,41 @@ def Graph_regularization_loss(X, Adj, gamma):
 
 
     return Loss_GL
+
+
+def Mask_Matrix(num_node, time_length, decay_rate):
+    Adj = torch.ones(num_node * time_length, num_node * time_length).cuda()
+    for i in range(time_length):
+        v = 0
+        for r_i in range(i,time_length):
+            idx_s_row = i * num_node
+            idx_e_row = (i + 1) * num_node
+            idx_s_col = (r_i) * num_node
+            idx_e_col = (r_i + 1) * num_node
+            Adj[idx_s_row:idx_e_row, idx_s_col:idx_e_col] = Adj[idx_s_row:idx_e_row, idx_s_col:idx_e_col] * (decay_rate ** (v))
+            v = v+1
+        v=0
+        for r_i in range(i+1):
+            idx_s_row = i * num_node
+            idx_e_row = (i + 1) * num_node
+            idx_s_col = (i-r_i) * num_node
+            idx_e_col = (i-r_i + 1) * num_node
+            Adj[idx_s_row:idx_e_row,idx_s_col:idx_e_col] = Adj[idx_s_row:idx_e_row,idx_s_col:idx_e_col] * (decay_rate ** (v))
+            v = v+1
+
+    return Adj
+
+
+
+def Conv_GraphST(input, time_window_size, stride):
+    ## input size is (bs, time_length, num_sensors, feature_dim)
+    ## output size is (bs, num_windows, num_sensors, time_window_size, feature_dim)
+    bs, time_length, num_sensors, feature_dim = input.size()
+    x_ = torch.transpose(input, 1, 3)
+
+    y_ = fun.unfold(x_, (num_sensors, time_window_size), stride=stride)
+
+    y_ = torch.reshape(y_, [bs, feature_dim, num_sensors, time_window_size, -1])
+    y_ = torch.transpose(y_, 1,-1)
+
+    return y_
