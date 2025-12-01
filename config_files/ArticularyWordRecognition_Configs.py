@@ -2,12 +2,12 @@ class Config(object):
     def __init__(self):
         # model configs
         self.input_channels = 9
-        self.num_nodes = 9
+        self.num_nodes = 28
 
-        self.window_size = 6
-        self.time_denpen_len = 24
+        self.window_size = 5
+        self.time_denpen_len = 10
 
-        self.convo_time_length = 15
+        self.convo_time_length = 3
         self.features_len = 18
 
 
@@ -52,8 +52,8 @@ class Config(object):
         self.num_global_layers = 3
         self.use_mpnn = 0
 
-        self.max_hop = 3
-        self.ran_num = 4
+        self.max_hop = 4
+        self.ran_num = 5
         self.repeat_sample = 2
 
         self.show_interval = 2
