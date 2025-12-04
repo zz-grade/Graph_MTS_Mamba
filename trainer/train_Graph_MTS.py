@@ -16,13 +16,14 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
         loss = model_train(model, model_optimizer, criterion, train_dl, device)
         if epoch % configs.show_interval == 0:
             accu_val = Cross_validation(model, train_dl, device)
-            # print("cross_accu", cross_accu)
-            # print("accu_val", accu_val)
+            print("cross_accu", cross_accu)
+            print("accu_val", accu_val)
             if accu_val > cross_accu:
                 cross_accu = accu_val
                 test_accu, prediction, real = Prediction(model, test_dl, device)
-
+                scheduler.step(loss)
                 print('In the {}th epoch, TESTING accuracy is {}%'.format(epoch, np.round(test_accu, 3)))
+                logger.debug('In the {}th epoch, TESTING accuracy is {}%'.format(epoch, np.round(test_accu, 3)))
                 test_accu_.append(test_accu)
                 prediction_.append(prediction)
                 labels.append(real)
@@ -32,13 +33,15 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
 
 def model_train(model, model_optimizer, criterion, train_loader, device):
     model.train()
-    num = int(len(train_loader.dataset) * 0.8)
+    # num = int(len(train_loader.dataset) * 0.8)
+    # print("train_loader.dataset", len(train_loader.dataset))
     loss_ = 0
     i = 0
     for data, labels in train_loader:
         i += 1
-        if i >= num:
-            break
+        # print("i", i)
+        # if i >= num:
+        #     break
         data, labels = data.float().to(device), labels.long().to(device)
         model_optimizer.zero_grad()
         prediction = model(data)
@@ -53,14 +56,14 @@ def model_train(model, model_optimizer, criterion, train_loader, device):
 
 def Cross_validation(model, train_loader, device):
     model.eval()
-    num = int(len(train_loader.dataset) * 0.8)
+    # num = int(len(train_loader.dataset) * 0.8)
     prediction_ = []
     real_ = []
     i = 0
     for data, label in train_loader:
         i += 1
-        if i < num:
-            continue
+        # if i < num:
+        #     continue
         data, labels = data.float().to(device), label.long().to(device)
         real_.append(label)
         prediction = model(data)

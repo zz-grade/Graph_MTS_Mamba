@@ -229,4 +229,4 @@ ts_read_UEA = ['SpokenArabicDigits', 'InsectWingbeat', 'CharacterTrajectories']
 
 
 if __name__ == '__main__':
-    data_loader("FingerMovements", "../TS_Dataset")
+    data_loader("ArticularyWordRecognition", "../TS_Dataset")
