@@ -7,7 +7,7 @@ class Config(object):
         self.window_size = 8
         self.time_denpen_len = 16
 
-        self.convo_time_length = 13
+        self.convo_time_length = 11
         # self.features_len = 18
 
 
@@ -15,7 +15,7 @@ class Config(object):
         self.stride = 1
 
         self.hidden_channels = 64
-        self.final_out_channels = 128
+        self.final_out_channels = 64
         #
         # self.hidden_channels = 96
         # self.final_out_channels = 64
@@ -48,11 +48,12 @@ class Config(object):
         self.dimension_state = 64
         self.dimension_conv = 4
         self.expand = 2
-        self.num_local_layers = 1
+        self.num_local_layers = 2
         self.num_global_layers = 3
+
         self.use_mpnn = 0
 
-        self.max_hop = 3
+        self.max_hop = 4
         self.ran_num = 4
         self.repeat_sample = 2
 

@@ -7,6 +7,13 @@ class Config(object):
         self.window_size = 6
         self.time_denpen_len = 24
 
+        self.window_size_train = 6
+        self.time_denpen_len_train = 24
+
+
+        self.window_size_val = 5
+        self.time_denpen_len_val = 10
+
         self.convo_time_length = 13
         self.features_len = 18
 
@@ -49,7 +56,7 @@ class Config(object):
         self.dimension_conv = 4
         self.expand = 2
         self.num_local_layers = 1
-        self.num_global_layers = 1
+        self.num_global_layers = 3
         self.use_mpnn = 0
 
         self.max_hop = 2

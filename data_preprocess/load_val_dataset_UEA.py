@@ -245,9 +245,20 @@ def data_loader(files_name, root):
         data_train = data_train[:, :, :-1]
         data_test = data_test[:, :, :-1]
 
+    # data_train: (N, C, L)  label_train: (N,)
+    N = data_train.size(0)
+    n_val = int(N * 0.2)
 
-    torch.save({'samples': data_train, 'labels': label_train}, os.path.join(root_saved_path, files_name, 'train.pt'))
-    # torch.save({'samples': val_data, 'labels': val_labels}, os.path.join(root_saved_path, files_name, 'val.pt'))
+    # 顺序切分：前面 train，后面 val
+    train_end = N - n_val
+    val_data = data_train[train_end:]
+    val_labels = label_train[train_end:]
+    train_data = data_train[:train_end]
+    train_labels = label_train[:train_end]
+
+
+    torch.save({'samples': train_data, 'labels': train_labels}, os.path.join(root_saved_path, files_name, 'train.pt'))
+    torch.save({'samples': val_data, 'labels': val_labels}, os.path.join(root_saved_path, files_name, 'val.pt'))
     torch.save({'samples': data_test, 'labels': label_test}, os.path.join(root_saved_path, files_name, 'test.pt'))
 
 
