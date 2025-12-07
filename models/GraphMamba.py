@@ -61,10 +61,9 @@ class GraphMambaGMN(nn.Module):
 
 
 
-    def forward(self, x, adj):
+    def forward(self, x, adj, rng):
         device = x.device
         b_samples, num_nodes, _ = x.size()
-        rng = random.Random(self.seed)
         node_token_feats_list = []
         perm_batch_list = []
         inv_perm_batch_list = []
@@ -82,19 +81,23 @@ class GraphMambaGMN(nn.Module):
             )  # (N, L, d_model)
             node_token_feats_list.append(node_token_feats_b)
 
-            # 度排序
-            weight_sums = []
-            for u in range(num_nodes):
-                neighbors = adj_list_b[u]
-                if len(neighbors) == 0:
-                    weight_sums.append(0)
-                else:
-                    s = adj[u, neighbors].sum().item()
-                    weight_sums.append(s)
-            weight_sums = torch.tensor(weight_sums, dtype=torch.float)
-            perm_b = torch.argsort(weight_sums, descending=False)  # 度小在前
-            inv_perm_b = torch.empty_like(perm_b)
-            inv_perm_b[perm_b] = torch.arange(num_nodes, dtype=torch.long)
+            with torch.no_grad():
+                # 度排序
+                weight_sums = []
+                for u in range(num_nodes):
+                    neighbors = adj_list_b[u]
+                    if len(neighbors) == 0:
+                        weight_sums.append(0)
+                    else:
+                        s = adj_b[u, neighbors].sum().item()
+                        weight_sums.append(s)
+                weight_sums = torch.tensor(weight_sums, dtype=torch.float)
+                perm_b = torch.argsort(weight_sums, descending=False)  # 度小在前
+                inv_perm_b = torch.empty_like(perm_b)
+                inv_perm_b[perm_b] = torch.arange(num_nodes, dtype=torch.long)
+
+
+
             perm_batch_list.append(perm_b)
             inv_perm_batch_list.append(inv_perm_b)
 
