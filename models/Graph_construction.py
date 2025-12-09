@@ -49,14 +49,14 @@ class Feature_extractor_1DCNN_Tiny(nn.Module):
         )
 
         self.conv_block2 = nn.Sequential(
-            nn.Conv1d(num_hidden, num_hidden * 2, kernel_size=kernel_size, stride=1, bias=False, padding=1),
-            nn.BatchNorm1d(out_dim),
+            nn.Conv1d(num_hidden, num_hidden * 2, kernel_size=kernel_size, stride=1, bias=False, padding=kernel_size // 2),
+            nn.BatchNorm1d(num_hidden * 2),
             nn.ReLU(),
             # nn.MaxPool1d(kernel_size=2, stride=2, padding=1)
         )
 
         self.conv_block3 = nn.Sequential(
-            nn.Conv1d(num_hidden * 2, out_dim, kernel_size=kernel_size, stride=1, bias=False, padding=2),
+            nn.Conv1d(num_hidden * 2, out_dim, kernel_size=kernel_size, stride=1, bias=False, padding=kernel_size // 2),
             nn.BatchNorm1d(out_dim),
             nn.ReLU(),
             # nn.MaxPool1d(kernel_size=2, stride=2, padding=1),

@@ -105,7 +105,8 @@ class Load_Training_Data(Dataset):
         return input
 
 
-def data_generator(data_path, configs, args):
+
+def data_generator2(data_path, configs, args):
     train_dataset = torch.load(os.path.join(data_path, 'train.pt'))
     val_dataset = torch.load(os.path.join(data_path, 'val.pt'))
     test_dataset = torch.load(os.path.join(data_path, 'test.pt'))
@@ -119,3 +120,17 @@ def data_generator(data_path, configs, args):
     test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
 
     return train_loader, val_loader, test_loader
+
+
+
+def data_generator(data_path, configs, args):
+    train_dataset = torch.load(os.path.join(data_path, 'train.pt'))
+    test_dataset = torch.load(os.path.join(data_path, 'test.pt'))
+
+    train_dataset = Load_Training_Data(train_dataset, configs, args)
+    test_dataset = Load_Training_Data(test_dataset, configs, args)
+
+    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
+
+    return train_loader, test_loader
