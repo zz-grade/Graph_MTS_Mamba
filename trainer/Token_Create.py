@@ -78,10 +78,14 @@ def _sample_tokens_for_all_nodes(num_nodes, configs, adj_list, rng):
         返回：tokens_per_node[v][t] 是节点 v 的第 t 个 token 的节点 id 列表。
         序列长度 L = (m + 1) * s。
     """
+    if configs.max_hop > 20:
+        i = int(configs.max_hop / 10 - 1)
+    else:
+        i = 1
     tokens_per_node = [[] for _ in range(num_nodes)]
     for v in range(num_nodes):
         tokens_v = []
-        for hop_len in range(configs.max_hop + 1):
+        for hop_len in range(configs.max_hop + i):
             for _ in range(configs.repeat_sample):
                 if hop_len == 0:
                     token_nodes = [v]
@@ -97,3 +101,4 @@ def _sample_tokens_for_all_nodes(num_nodes, configs, adj_list, rng):
         tokens_v = list(reversed(tokens_v))
         tokens_per_node[v] = tokens_v
     return tokens_per_node
+

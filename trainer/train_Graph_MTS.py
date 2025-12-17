@@ -1,11 +1,18 @@
+import os
+from os import write
+
 import torch.nn as nn
 import torch
 import numpy as np
 from collections import Counter
+from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 import time
 
 
-def Trainer(model, model_optimizer, train_dl, val_dl, test_dl, device, logger, configs, args):
+def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, args):
+    # writer = SummaryWriter("runs/mem")
+    # global_step = 0
     logger.debug("Training started ....")
     criterion = nn.CrossEntropyLoss()
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(model_optimizer, 'min')
@@ -13,19 +20,26 @@ def Trainer(model, model_optimizer, train_dl, val_dl, test_dl, device, logger, c
     test_accu_ = []
     prediction_ = []
     labels = []
+
     for epoch in range(1, configs.num_epoch + 1):
+        # train_sampler.set_epoch(epoch)
+        # test_sampler.set_epoch(epoch)
         loss = model_train(model, model_optimizer, criterion, train_dl, device)
 
         if epoch % configs.show_interval == 0:
-            accu_val = Cross_validation(model, train_dl, val_dl, device)
-            print("cross_accu", cross_accu)
-            print("accu_val", accu_val)
+            accu_val = Cross_validation(model, train_dl, device)
+            rank = int(os.environ.get("RANK", "0"))
+            is_main = (rank == 0)
+            if is_main:
+                print(datetime.now(), "cross_accu", cross_accu)
+                print(datetime.now(), "accu_val", accu_val)
             # if accu_val > cross_accu:
             cross_accu = accu_val
             test_loss, test_accu, test_f1, prediction, real = Prediction(model, criterion, test_dl, device)
             scheduler.step(test_loss)
-            logger.debug('In the {}th epoch, TESTING accuracy is {}%'.format(epoch, np.round(test_accu, 3)))
-            logger.debug('In the {}th epoch, TESTING MacroF1 is {}%'.format(epoch, np.round(test_f1, 3)))
+            if is_main:
+                logger.debug('{} In the {}th epoch, TESTING accuracy is {}%'.format(datetime.now(), epoch, np.round(test_accu, 3)))
+                logger.debug('{} In the {}th epoch, TESTING MacroF1 is {}%'.format(datetime.now(), epoch, np.round(test_f1, 3)))
             test_accu_.append(test_accu)
             prediction_.append(prediction)
             labels.append(real)
@@ -60,17 +74,24 @@ def model_train(model, model_optimizer, criterion, train_loader, device):
         # loss.backward()
         # model_optimizer.step()
         loss_ = loss_ + loss.item()
+
+        # if global_step % 3 == 0:  # 每10步记一次，防止日志太大
+        #     writer.add_scalar("mem/allocated_MB", torch.cuda.memory_allocated() / 1024 ** 2, global_step)
+        #     writer.add_scalar("mem/reserved_MB", torch.cuda.memory_reserved() / 1024 ** 2, global_step)
+        #     writer.add_scalar("mem/peak_allocated_MB", torch.cuda.max_memory_allocated() / 1024 ** 2, global_step)
+        #
+        # global_step += 1
     return loss_
 
 
-def Cross_validation(model, train_loader, val_dl, device):
+def Cross_validation(model, train_loader, device):
     model.eval()
     # num = int(len(train_loader.dataset) * 0.8)
     prediction_ = []
     real_ = []
     i = 0
     with torch.no_grad():
-        for data, label in val_dl:
+        for data, label in train_loader:
             i += 1
             # if i < num:
             #     continue
