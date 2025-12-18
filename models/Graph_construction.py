@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as fun
-import time
+from datetime import datetime
 import math
 import copy
 
@@ -33,6 +33,96 @@ class transformer_construction(nn.Module):
         relation_lists = torch.stack(relation_lists, 1)
         relation_lists = torch.mean(relation_lists, 1)
         return relation_lists
+
+
+
+class NeuralSparseSparsifier(nn.Module):
+
+    def __init__(self, node_dim, edge_dim=0, hidden=128):
+        super().__init__()
+        in_dim = 2 * node_dim + edge_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+
+
+    def forward(self, X, Adj, k=10, tau=1.0, hard=True, self_loop=False):
+        """
+        X:   (B, N, d_n) node features
+        Adj: (B, N, N)   adjacency mask (0/1) OR
+             (B, N, N, d_e) edge features (0 for non-edges)
+        k:   keep at most k outgoing edges per node
+        tau: temperature (论文建议训练时从大到小退火) :contentReference[oaicite:5]{index=5}
+        hard:
+          - True: hard top-k mask (0/1)
+          - False: soft weights (continuous)
+        return:
+          mask: (B, N, N)  (float in [0,1])
+          (optional) Adj_sparse if Adj has edge features
+        """
+        b_samples, num_nodes, _ = X.shape
+        device = X.device
+
+        topk = Adj.topk(7, dim=-1).indices
+
+        # _, idx = torch.sort(Adj, descending=True, dim=-1)
+        new_coe_Adj = torch.zeros_like(Adj)
+        # topk = idx[:, :, :7]
+        bat_id = torch.arange(Adj.size(0)).unsqueeze(1).unsqueeze(1)
+        sensor_id = torch.arange(Adj.size(1)).unsqueeze(1).unsqueeze(0)
+        new_coe_Adj[bat_id, sensor_id, topk] = 1
+
+
+        # Build edge mask E (B,N,N)
+        edges = Adj.bool()
+        edge_feat = None
+
+        # print(datetime.now(), "节点边扩展开始")
+        # Pair features (dense): (B,N,N,dn) + (B,N,N,dn) (+ edge_feat)
+        Xu = X.unsqueeze(2).expand(b_samples, num_nodes, num_nodes, X.size(-1))  # u repeated along v
+        Xv = X.unsqueeze(1).expand(b_samples, num_nodes, num_nodes, X.size(-1))  # v repeated along u
+
+        pair = torch.cat([Xu, Xv], dim=-1)
+        # print(datetime.now(), "节点边扩展完成")
+
+        # print(datetime.now(), "全连接学习边开始")
+        # Edge logits z_{u,v}  (论文 Eq.4) :contentReference[oaicite:6]{index=6}
+        logits = self.mlp(pair).squeeze(-1)  # (B,N,N)
+        # print(datetime.now(), "全连接学习边完成")
+
+        # Mask non-neighbors to -inf so they won't be selected
+        neg_inf = torch.finfo(logits.dtype).min
+        logits = logits.masked_fill(~edges, neg_inf)
+
+        # print(datetime.now(), "Gumbel开始")
+        # Gumbel trick
+        g = sample_gumbel(logits.shape, device=device)
+        y = (logits + g) / max(tau, 1e-8)
+        # print(datetime.now(), "Gumbel完成")
+
+        if hard:
+            # Hard top-k per node (u): sample without replacement by topk on (logits+gumbel)
+            # 与论文“每个节点最多选 k 条边”一致 :contentReference[oaicite:7]{index=7}
+            idx = y.topk(k=min(k, num_nodes), dim=-1).indices  # (B,N,k)
+            mask = torch.zeros((b_samples, num_nodes, num_nodes), device=device, dtype=torch.float32)
+            mask.scatter_(dim=-1, index=idx, value=1.0)
+            # 如果某些节点度数 < k，topk 会带进 -inf 的位置；乘 E 清掉即可
+            mask = mask * edges.float()
+        else:
+            # Soft weights: Gumbel-Softmax over neighbors (论文 Eq.6) :contentReference[oaicite:8]{index=8}
+            w = fun.softmax(y, dim=-1)  # sums to 1 over all v (non-edges≈0)
+            # 让“期望保留边数≈k”：用 k 倍缩放再截断到 1（工程上的常用近似）
+            mask = (w * float(k)).clamp(max=1.0) * edges.float()
+
+        mask[bat_id, sensor_id, topk] = 0
+
+        coe_Adj = mask + new_coe_Adj
+        # print(datetime.now(), "图学习完成")
+        return coe_Adj
+
+
 
 
 class Feature_extractor_1DCNN_Tiny(nn.Module):
@@ -209,3 +299,13 @@ def Conv_GraphST(input, time_window_size, stride):
     y_ = torch.transpose(y_, 1,-1)
 
     return y_
+
+
+def sample_gumbel(shape, device, eps=1e-10):
+    U = torch.rand(shape, device=device)
+    return -torch.log(-torch.log(U.clamp(min=eps, max=1 - eps)))
+
+
+# ====== 温度 tau 的一个常用退火（从大到小）:contentReference[oaicite:9]{index=9}
+def tau_anneal(epoch, r=1e-2, tau_min=0.05):
+    return max(tau_min, float(torch.exp(torch.tensor(-r * epoch))))
