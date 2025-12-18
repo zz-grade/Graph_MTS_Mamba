@@ -79,14 +79,22 @@ def _sample_tokens_for_all_nodes(num_nodes, configs, adj_list, rng):
         序列长度 L = (m + 1) * s。
     """
 
-    i = 2
+    hops = []
+    hop = 0
+    gap = 1
+    while hop <= configs.max_hop+1:
+        hops.append(hop)
+        hop += gap
+        if hop > 10:
+            gap = int(configs.max_hop / 10 + gap)
+        else:
+            gap = 2
+
     tokens_per_node = [[] for _ in range(num_nodes)]
     # self_neig_node = [[] for _ in range(num_nodes)]
     for v in range(num_nodes):
         tokens_v = []
-        for hop_len in range(configs.max_hop + i):
-            if hop_len > 10:
-                i = int(configs.max_hop / 10 + i)
+        for hop_len in hops:
             for _ in range(configs.repeat_sample):
                 if hop_len == 0:
                     token_nodes = [v]
