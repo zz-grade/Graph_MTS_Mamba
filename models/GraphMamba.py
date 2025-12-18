@@ -106,11 +106,16 @@ class GraphMambaGMN(nn.Module):
         for b in range(b_samples):
             adj_b = adj[b]
             x_b = x[b]
+            # print(datetime.now(), "子图构建开始")
             adj_list_b = tc._build_adj_list_from_matrix(adj_b)
             tokens_per_node_b = tc._sample_tokens_for_all_nodes(num_nodes,self.configs,adj_list_b,rng)
 
+            # print(datetime.now(), "子图构建完成")
+            # print(datetime.now(), "子图编码开始")
+            # print(datetime.now(), "GNN开始")
             neighbor_edge = tc._build_edge_index_from_matrix(adj_b)
             neigh_nodes = self.mpnn(x_b, neighbor_edge)
+            # print(datetime.now(), "GNN完成")
 
             # 子图编码
             node_token_feats_b = self._encode_subgraph_tokens_single(
@@ -120,6 +125,7 @@ class GraphMambaGMN(nn.Module):
             neigh_tok = neigh_nodes.unsqueeze(1)  # (N, 1, D)
             node_token_feats_b = torch.cat([neigh_tok, node_token_feats_b], dim=1)  # (N, L+1, D)
             node_token_feats_list.append(node_token_feats_b)
+            # print(datetime.now(), "子图编码开始")
 
             # with torch.no_grad():
             #     # 度排序
