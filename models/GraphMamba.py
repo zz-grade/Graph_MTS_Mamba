@@ -2,7 +2,8 @@ import random
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.nn.functional as fun
+from torch_geometric.nn import MessagePassing
 from datetime import datetime
 
 
@@ -33,7 +34,7 @@ class GraphMambaGMN(nn.Module):
             for _ in range(configs.num_global_layers)
         ])
         if configs.use_mpnn:
-            self.mpnn = MPNN_nk(d_model, d_model)
+            self.mpnn = MPNN_nk(configs.hidden_channels, d_model, configs.mpnn_layer)
         else:
             self.mpnn = None
         self.proj = nn.Linear(64,128)
@@ -51,7 +52,7 @@ class GraphMambaGMN(nn.Module):
         num_nodes, in_dim = x_single.size()
         device = x_single.device
         l_token = len(tokens_per_node[0])
-        node_token_feats = torch.zeros(num_nodes, l_token, self.d_model, device=device)
+        # node_token_feats = torch.zeros(num_nodes, l_token, self.d_model, device=device)
         T = num_nodes * l_token
 
         flat_node_ids = []
@@ -108,12 +109,16 @@ class GraphMambaGMN(nn.Module):
             adj_list_b = tc._build_adj_list_from_matrix(adj_b)
             tokens_per_node_b = tc._sample_tokens_for_all_nodes(num_nodes,self.configs,adj_list_b,rng)
 
+            neighbor_edge = tc._build_edge_index_from_matrix(adj_b)
+            neigh_nodes = self.mpnn(x_b, neighbor_edge)
 
             # 子图编码
             node_token_feats_b = self._encode_subgraph_tokens_single(
                 x_single=x_b,
                 tokens_per_node=tokens_per_node_b,
             )  # (N, L, d_model)
+            neigh_tok = neigh_nodes.unsqueeze(1)  # (N, 1, D)
+            node_token_feats_b = torch.cat([neigh_tok, node_token_feats_b], dim=1)  # (N, L+1, D)
             node_token_feats_list.append(node_token_feats_b)
 
             # with torch.no_grad():
@@ -176,7 +181,7 @@ class GraphMambaGMN(nn.Module):
                 edge_index_b = edge_index_list[b]
                 if edge_index_b is not None and edge_index_b.numel() > 0:
                     mpnn_out_b = self.mpnn(h_b, edge_index_b)
-                    new_repr_b = h_b + F.relu(mpnn_out_b)
+                    new_repr_b = h_b + fun.relu(mpnn_out_b)
                 else:
                     new_repr_b = h_b
                 new_repr_list.append(new_repr_b)
@@ -221,19 +226,32 @@ class BidirectionalMamba(nn.Module):
 
 
 
-class MPNN_nk(nn.Module):
-    def __init__(self, in_fea, out_fea):
+class MPNN_nk(MessagePassing):
+    def __init__(self, in_fea, out_fea, mpnn_layer):
         super().__init__()
-        self.lin_self = nn.Linear(in_fea, out_fea)
-        self.lin_neig = nn.Linear(in_fea, out_fea)
+        self.msg_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_fea, out_fea),
+                nn.ReLU(),
+                nn.Linear(out_fea, out_fea)
+            )
+            for _ in range(mpnn_layer)
+        ])
+        self.upd_mlps = nn.ModuleList([
+            nn.Sequential(
+            nn.Linear(in_fea+out_fea, out_fea),
+            nn.ReLU(),
+            nn.Linear(out_fea, out_fea),
+            )
+            for _ in range(mpnn_layer)
+        ])
 
-    def forward(self, curr_fea, edge_index):
-        num_nodes, dimension = curr_fea.size()
-        device = curr_fea.device()
-        src, dst = edge_index
-        src_all = torch.cat([src, dst], dim=0)
-        dst_all = torch.cat([dst, src], dim=0)
-        nei_sum = torch.zeros(num_nodes, dimension, device=device)
-        nei_sum.index_add_(0, dst_all, curr_fea[src_all])
-        out_fea = self.lin_self(curr_fea) + self.lin_neig(nei_sum)
-        return out_fea
+    def forward(self, x, edge_index):
+        for msg_mlp, upd_mlp in zip(self.msg_mlps, self.upd_mlps):
+            m = self.propagate(edge_index, x=x, msg_mlp=msg_mlp)
+            out = upd_mlp(torch.cat([x, m], dim=-1))
+        return out
+
+    def message(self, x_j, msg_mlp):
+        # h_j: (E_total, hidden)
+        return msg_mlp(x_j)

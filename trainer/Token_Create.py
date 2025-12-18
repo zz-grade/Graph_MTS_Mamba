@@ -48,7 +48,7 @@ def _build_adj_list_from_matrix(adj):
 
 
 def _build_edge_index_from_matrix(adj):
-    adj_cpu = adj.detach().cpu()
+    adj_cpu = adj.detach()
     edges = (adj_cpu != 0).nonzero(as_tuple=False)  # (E, 2)
 
     if edges.numel() == 0:
@@ -78,14 +78,15 @@ def _sample_tokens_for_all_nodes(num_nodes, configs, adj_list, rng):
         返回：tokens_per_node[v][t] 是节点 v 的第 t 个 token 的节点 id 列表。
         序列长度 L = (m + 1) * s。
     """
-    if configs.max_hop > 20:
-        i = int(configs.max_hop / 10 - 1)
-    else:
-        i = 1
+
+    i = 2
     tokens_per_node = [[] for _ in range(num_nodes)]
+    # self_neig_node = [[] for _ in range(num_nodes)]
     for v in range(num_nodes):
         tokens_v = []
         for hop_len in range(configs.max_hop + i):
+            if hop_len > 10:
+                i = int(configs.max_hop / 10 + i)
             for _ in range(configs.repeat_sample):
                 if hop_len == 0:
                     token_nodes = [v]
@@ -100,5 +101,30 @@ def _sample_tokens_for_all_nodes(num_nodes, configs, adj_list, rng):
                 tokens_v.append(token_nodes)
         tokens_v = list(reversed(tokens_v))
         tokens_per_node[v] = tokens_v
+
+        # self_neig = list(_build_edge_index_from_matrix())
+        # self_neig_node[v] = self_neig
     return tokens_per_node
 
+
+
+def build_edge_index_per_batch(adj: torch.Tensor, self_loop: bool = True):
+    """
+    adj: (B, N, N)  (bool/0-1/weight)
+    return: List[edge_index_b], len=B, each edge_index_b is (2, E_b) on same device
+    """
+    assert adj.dim() == 3
+    b_samples, num_nodes, _ = adj.shape
+    device = adj.device
+
+    edges_mask = adj != 0  # (B,N,N) bool
+
+    if not self_loop:
+        eye = torch.eye(num_nodes, device=device, dtype=torch.bool).unsqueeze(0)  # (1,N,N)
+        edges_mask = edges_mask & (~eye)
+
+    edge_index_list = []
+    uv = edges_mask.nonzero(as_tuple=False)  # (E_b, 2) [u,v]
+    edge_index_b = uv.t().contiguous().long()  # (2, E_b)
+
+    return edge_index_list
