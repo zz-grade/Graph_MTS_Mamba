@@ -38,7 +38,7 @@ class transformer_construction(nn.Module):
 
 class NeuralSparseSparsifier(nn.Module):
 
-    def __init__(self, node_dim, edge_dim=0, hidden=128):
+    def __init__(self, edge_num, similar_edge, node_dim, edge_dim=0, hidden=128):
         super().__init__()
         in_dim = 2 * node_dim + edge_dim
         self.mlp = nn.Sequential(
@@ -46,9 +46,11 @@ class NeuralSparseSparsifier(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden, 1),
         )
+        self.edge_num = edge_num
+        self.similar_edge = similar_edge
 
 
-    def forward(self, X, Adj, k=10, tau=1.0, hard=True, self_loop=False):
+    def forward(self, X, Adj, tau=1.0, hard=True, self_loop=False):
         """
         X:   (B, N, d_n) node features
         Adj: (B, N, N)   adjacency mask (0/1) OR
@@ -65,7 +67,7 @@ class NeuralSparseSparsifier(nn.Module):
         b_samples, num_nodes, _ = X.shape
         device = X.device
 
-        topk = Adj.topk(7, dim=-1).indices
+        topk = Adj.topk(self.similar_edge, dim=-1).indices
 
         # _, idx = torch.sort(Adj, descending=True, dim=-1)
         new_coe_Adj = torch.zeros_like(Adj)
@@ -105,7 +107,7 @@ class NeuralSparseSparsifier(nn.Module):
         if hard:
             # Hard top-k per node (u): sample without replacement by topk on (logits+gumbel)
             # 与论文“每个节点最多选 k 条边”一致 :contentReference[oaicite:7]{index=7}
-            idx = y.topk(k=min(k, num_nodes), dim=-1).indices  # (B,N,k)
+            idx = y.topk(k=min(self.edge_num, num_nodes), dim=-1).indices  # (B,N,k)
             mask = torch.zeros((b_samples, num_nodes, num_nodes), device=device, dtype=torch.float32)
             mask.scatter_(dim=-1, index=idx, value=1.0)
             # 如果某些节点度数 < k，topk 会带进 -inf 的位置；乘 E 清掉即可
@@ -114,7 +116,7 @@ class NeuralSparseSparsifier(nn.Module):
             # Soft weights: Gumbel-Softmax over neighbors (论文 Eq.6) :contentReference[oaicite:8]{index=8}
             w = fun.softmax(y, dim=-1)  # sums to 1 over all v (non-edges≈0)
             # 让“期望保留边数≈k”：用 k 倍缩放再截断到 1（工程上的常用近似）
-            mask = (w * float(k)).clamp(max=1.0) * edges.float()
+            mask = (w * float(self.edge_num)).clamp(max=1.0) * edges.float()
 
         mask[bat_id, sensor_id, topk] = 0
 

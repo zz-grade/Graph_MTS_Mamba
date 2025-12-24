@@ -69,6 +69,8 @@ class Config(object):
         self.decay_rate = 0.7
 
         self.mpnn_layer = 1
+        self.edge_num = 10
+        self.similar_edge = 7
 
 
 class augmentations(object):
