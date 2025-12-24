@@ -12,7 +12,7 @@ class Config(object):
         self.window_size_val = 2
         self.time_denpen_len_val = 31
 
-        self.convo_time_length = 5
+        self.convo_time_length = 6
         # self.features_len = 18
 
 
