@@ -12,7 +12,7 @@ class Config(object):
         self.window_size_val = 5
         self.time_denpen_len_val = 10
 
-        self.convo_time_length = 3
+        self.convo_time_length = 9
         # self.features_len = 18
 
 
@@ -20,7 +20,7 @@ class Config(object):
         self.stride = 1
 
         self.hidden_channels = 64
-        self.final_out_channels = 128
+        self.final_out_channels = 64
         #
         # self.hidden_channels = 96
         # self.final_out_channels = 64
@@ -41,10 +41,11 @@ class Config(object):
         self.beta1 = 0.9
         self.beta2 = 0.99
         self.lr = 5e-4
+        self.weight_decay = 3e-4
 
         # data parameters
         self.drop_last = False
-        self.batch_size = 256
+        self.batch_size = 128
         self.batch_size_test = 16
 
         self.Context_Cont = Context_Cont_configs()
@@ -54,18 +55,20 @@ class Config(object):
         self.dimension_state = 64
         self.dimension_conv = 4
         self.expand = 2
-        self.num_local_layers = 2
-        self.num_global_layers = 3
+        self.num_local_layers = 1
+        self.num_global_layers = 1
 
-        self.use_mpnn = 0
+        self.use_mpnn = 1
 
         self.max_hop = 5
-        self.ran_num = 6
+        self.ran_num = 2
         self.repeat_sample = 2
 
         self.show_interval = 1
 
         self.decay_rate = 0.7
+
+        self.mpnn_layer = 1
 
 
 class augmentations(object):
