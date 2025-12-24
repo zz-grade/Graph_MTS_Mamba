@@ -28,7 +28,7 @@ class Base_model(nn.Module):
         self.time_length = configs.convo_time_length
         self.Time_Graph_contrustion = Feature_extractor_1DCNN_Tiny(configs.window_size, 32, configs.hidden_channels,
                                                                    configs.kernel_size, configs.stride, configs.dropout)
-        self.sparseEdge = NeuralSparseSparsifier(configs.hidden_channels, configs.edge_num, configs.similar_edge)
+        self.sparseEdge = NeuralSparseSparsifier(configs.edge_num, configs.similar_edge, configs.hidden_channels)
         self.Graph_Mamba = GraphMambaGMN(configs, args)
         self.logits = nn.Linear(configs.convo_time_length * configs.final_out_channels * configs.num_nodes,
                                 configs.num_classes)
