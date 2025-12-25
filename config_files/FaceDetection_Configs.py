@@ -56,22 +56,23 @@ class Config(object):
         self.dimension_state = 64
         self.dimension_conv = 4
         self.expand = 2
-        self.num_local_layers = 2
-        self.num_global_layers = 2
+        self.num_local_layers = 1
+        self.num_global_layers = 3
 
         self.use_mpnn = 1
 
         self.max_hop = 6
-        self.ran_num = 2
+        self.ran_num = 3
         self.repeat_sample = 1
 
         self.show_interval = 1
+        self.mlp_hidden = 256
 
         self.decay_rate = 0.7
 
         self.mpnn_layer = 1
-        self.edge_num = 10
-        self.similar_edge = 7
+        self.edge_num = 8
+        self.similar_edge = 3
 
 
 class augmentations(object):

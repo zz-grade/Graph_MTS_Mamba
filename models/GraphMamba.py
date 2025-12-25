@@ -21,9 +21,9 @@ class GraphMambaGMN(nn.Module):
         super().__init__()
         d_model = configs.dimension_token
         self.subgraph_encoder = nn.Sequential(
-            nn.Linear(configs.hidden_channels, d_model),
+            nn.Linear(configs.hidden_channels, self.mlp_hidden),
             nn.ReLU(),
-            nn.Linear(d_model, d_model),
+            nn.Linear(self.mlp_hidden, d_model),
         )
         self.local_mamba = nn.ModuleList([
             BidirectionalMamba(configs)
