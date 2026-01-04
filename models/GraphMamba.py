@@ -21,9 +21,10 @@ class GraphMambaGMN(nn.Module):
         super().__init__()
         d_model = configs.dimension_token
         self.subgraph_encoder = nn.Sequential(
-            nn.Linear(configs.hidden_channels, self.mlp_hidden),
+            nn.Linear(configs.hidden_channels, configs.mlp_hidden),
+            nn.RMSNorm(configs.mlp_hidden),
             nn.ReLU(),
-            nn.Linear(self.mlp_hidden, d_model),
+            nn.Linear(configs.mlp_hidden, d_model),
         )
         self.local_mamba = nn.ModuleList([
             BidirectionalMamba(configs)
@@ -107,8 +108,8 @@ class GraphMambaGMN(nn.Module):
             adj_b = adj[b]
             x_b = x[b]
             # print(datetime.now(), "子图构建开始")
-            adj_list_b = tc._build_adj_list_from_matrix(adj_b)
-            tokens_per_node_b = tc._sample_tokens_for_all_nodes(num_nodes,self.configs,adj_list_b,rng)
+            # adj_list_b = tc._build_adj_list_from_matrix(adj_b)
+            # tokens_per_node_b = tc._sample_tokens_for_all_nodes(num_nodes,self.configs,adj_list_b,rng)
 
             # print(datetime.now(), "子图构建完成")
             # print(datetime.now(), "子图编码开始")
@@ -118,12 +119,12 @@ class GraphMambaGMN(nn.Module):
             # print(datetime.now(), "GNN完成")
 
             # 子图编码
-            node_token_feats_b = self._encode_subgraph_tokens_single(
-                x_single=x_b,
-                tokens_per_node=tokens_per_node_b,
-            )  # (N, L, d_model)
-            neigh_tok = neigh_nodes.unsqueeze(1)  # (N, 1, D)
-            node_token_feats_b = torch.cat([neigh_tok, node_token_feats_b], dim=1)  # (N, L+1, D)
+            # node_token_feats_b = self._encode_subgraph_tokens_single(
+            #     x_single=x_b,
+            #     tokens_per_node=tokens_per_node_b,
+            # )  # (N, L, d_model)
+            node_token_feats_b = neigh_nodes.unsqueeze(1)  # (N, 1, D)
+            # node_token_feats_b = torch.cat([neigh_tok, node_token_feats_b], dim=1)  # (N, L+1, D)
             node_token_feats_list.append(node_token_feats_b)
             # print(datetime.now(), "子图编码开始")
 
