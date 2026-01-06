@@ -38,19 +38,22 @@ class transformer_construction(nn.Module):
 
 class NeuralSparseSparsifier(nn.Module):
 
-    def __init__(self, edge_num, similar_edge, node_dim, edge_dim=0, hidden=128):
+    def __init__(self, configs, edge_num, similar_edge, node_dim, edge_dim=0, hidden=128):
         super().__init__()
-        in_dim = 2 * node_dim + edge_dim
+        in_dim = 2 * configs.hidden_channels + edge_dim
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.ReLU(),
             nn.Linear(hidden, 1),
         )
-        self.edge_num = edge_num
-        self.similar_edge = similar_edge
+        self.edge_num = configs.edge_num
+        self.similar_edge = configs.similar_edge
+        self.max_hop = configs.max_hop
+        self.ran_num = configs.ran_num
+        self.sample_num = configs.sample_num
 
 
-    def forward(self, X, Adj, tau=1.0, hard=True, self_loop=False):
+    def forward(self, X, Adj, tau_gumbel=1.0, tau_walk=1.0, hard=True, uniform_walk=True):
         """
         X:   (B, N, d_n) node features
         Adj: (B, N, N)   adjacency mask (0/1) OR
@@ -64,63 +67,167 @@ class NeuralSparseSparsifier(nn.Module):
           mask: (B, N, N)  (float in [0,1])
           (optional) Adj_sparse if Adj has edge features
         """
-        b_samples, num_nodes, _ = X.shape
+        b_samples, num_nodes, Fdim = X.shape
         device = X.device
 
+        # ----------  固定最相似边 ----------
         topk = Adj.topk(self.similar_edge, dim=-1).indices
+        bat_id = torch.arange(b_samples, device=device)[:, None, None]  # (B,1,1)
+        row_id = torch.arange(num_nodes, device=device)[None, :, None]  # (1,N,1)
+        fix_cols = Adj.topk(k=self.similar_edge, dim=-1).indices  # (B,N,k_fix)
+        fix_adj = torch.zeros(b_samples, num_nodes, num_nodes, device=device, dtype=torch.float32)
+        fix_adj[bat_id, row_id, fix_cols] = 1.0
 
-        # _, idx = torch.sort(Adj, descending=True, dim=-1)
-        new_coe_Adj = torch.zeros_like(Adj)
-        # topk = idx[:, :, :7]
-        bat_id = torch.arange(Adj.size(0)).unsqueeze(1).unsqueeze(1)
-        sensor_id = torch.arange(Adj.size(1)).unsqueeze(1).unsqueeze(0)
-        new_coe_Adj[bat_id, sensor_id, topk] = 1
-
-
-        # Build edge mask E (B,N,N)
-        edges = Adj.bool()
-        edge_feat = None
-
-        # print(datetime.now(), "节点边扩展开始")
-        # Pair features (dense): (B,N,N,dn) + (B,N,N,dn) (+ edge_feat)
-        Xu = X.unsqueeze(2).expand(b_samples, num_nodes, num_nodes, X.size(-1))  # u repeated along v
-        Xv = X.unsqueeze(1).expand(b_samples, num_nodes, num_nodes, X.size(-1))  # v repeated along u
-
-        pair = torch.cat([Xu, Xv], dim=-1)
-        # print(datetime.now(), "节点边扩展完成")
-
-        # print(datetime.now(), "全连接学习边开始")
-        # Edge logits z_{u,v}  (论文 Eq.4) :contentReference[oaicite:6]{index=6}
-        logits = self.mlp(pair).squeeze(-1)  # (B,N,N)
-        # print(datetime.now(), "全连接学习边完成")
-
-        # Mask non-neighbors to -inf so they won't be selected
-        neg_inf = torch.finfo(logits.dtype).min
-        logits = logits.masked_fill(~edges, neg_inf)
-
-        # print(datetime.now(), "Gumbel开始")
-        # Gumbel trick
-        g = sample_gumbel(logits.shape, device=device)
-        y = (logits + g) / max(tau, 1e-8)
-        # print(datetime.now(), "Gumbel完成")
-
-        if hard:
-            # Hard top-k per node (u): sample without replacement by topk on (logits+gumbel)
-            # 与论文“每个节点最多选 k 条边”一致 :contentReference[oaicite:7]{index=7}
-            idx = y.topk(k=min(self.edge_num, num_nodes), dim=-1).indices  # (B,N,k)
-            mask = torch.zeros((b_samples, num_nodes, num_nodes), device=device, dtype=torch.float32)
-            mask.scatter_(dim=-1, index=idx, value=1.0)
-            # 如果某些节点度数 < k，topk 会带进 -inf 的位置；乘 E 清掉即可
-            mask = mask * edges.float()
+        # -----  随机游走：预计算转移分布 probs[b,u,:] -----
+        if uniform_walk:
+            # 均匀：每步从 N-1 个节点里等概率选（这里用 multinomial 需要 probs）
+            probs = torch.ones((b_samples, num_nodes, num_nodes), device=device, dtype=torch.float32)
+            probs.diagonal(dim1=-2, dim2=-1).zero_()
+            probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         else:
-            # Soft weights: Gumbel-Softmax over neighbors (论文 Eq.6) :contentReference[oaicite:8]{index=8}
-            w = fun.softmax(y, dim=-1)  # sums to 1 over all v (non-edges≈0)
-            # 让“期望保留边数≈k”：用 k 倍缩放再截断到 1（工程上的常用近似）
-            mask = (w * float(self.edge_num)).clamp(max=1.0) * edges.float()
+            # 加权：用 softmax(A/tau_walk) 作为转移概率（A 越大越容易走到）
+            A = Adj.float()
+            probs = torch.softmax(A / max(tau_walk, 1e-8), dim=-1).to(torch.float32)
 
-        mask[bat_id, sensor_id, topk] = 0
+        # ----- 随机游走收集候选 cand_cols (B,N,Kcand) -----
+        cand_cols = torch.full((b_samples, num_nodes, self.sample_num), -1, device=device, dtype=torch.long)
+        cand_mask = torch.zeros((b_samples, num_nodes, self.sample_num), device=device, dtype=torch.bool)
 
-        coe_Adj = mask + new_coe_Adj
+        # cur: (B,N,W)  每个节点 u 启动 W 条 walk，初始都在 u
+        cur = torch.arange(num_nodes, device=device, dtype=torch.long)[None, :, None].expand(b_samples, num_nodes, self.ran_num).clone()
+
+        b_idx = torch.arange(b_samples, device=device)[:, None, None].expand(b_samples, num_nodes, self.ran_num)  # (B,N,W)
+        u_idx = torch.arange(num_nodes, device=device)[None, :, None].expand(b_samples, num_nodes, self.ran_num)  # (B,N,W)
+
+        # 每一步把所有 (B,N,W) 同时走一步，并把访问到的节点记录下来
+        visited_steps = []
+        for _ in range(self.max_hop):
+            # dist: (B,N,W,N)  当前所在节点的转移分布
+            dist = probs[b_idx, cur]  # 高级索引取 probs[b, cur, :]
+            dist_flat = dist.reshape(-1, num_nodes)  # (B*N*W, N)
+
+            nxt_flat = torch.multinomial(dist_flat, num_samples=1, replacement=True).squeeze(-1)  # (B*N*W,)
+            cur = nxt_flat.view(b_samples, num_nodes, self.ran_num)  # (B,N,W)
+
+            visited_steps.append(cur)
+
+        # visited: (B,N,W,L) -> (B,N,T)
+        visited = torch.stack(visited_steps, dim=-1).reshape(b_samples, num_nodes, self.ran_num * self.max_hop)
+        T = visited.size(-1)
+
+        # 从 visited 中按顺序填充 cand_cols 的 K 个槽位：去掉 self + 去重
+        # （K 很小，比如 5；T=W*L 也不大，循环开销非常小）
+        self_id = torch.arange(num_nodes, device=device)[None, :, None]  # (1,N,1)
+
+        for t in range(T):
+            v = visited[:, :, t]  # (B,N)
+
+            # 过滤自环
+            valid = (v != self_id.squeeze(-1))
+
+            # 过滤重复：如果 v 已经在 cand_cols 里，跳过
+            already = (cand_cols == v.unsqueeze(-1)).any(dim=-1)  # (B,N)
+            can_use = valid & (~already)
+
+            # 依次填第一个空位
+            for k in range(self.sample_num):
+                empty = cand_cols[:, :, k] < 0  # (B,N)
+                put = can_use & empty  # (B,N)
+                if not put.any():
+                    continue
+                cand_cols[:, :, k] = torch.where(put, v, cand_cols[:, :, k])
+                cand_mask[:, :, k] = cand_mask[:, :, k] | put
+
+                # 同一个 (b,u) 的这个 v 放进一个槽后，就不要再放到后面槽
+                can_use = can_use & (~put)
+
+            # 如果全部填满了，可以提前停（可选）
+            if (cand_cols[:, :, -1] >= 0).all():
+                break
+
+
+        # ----- 4) 在候选边上用 MLP 学习挑选 edge_num 条（不做 N×N pair！） -----
+        # x_u: (B,N,Kcand,F)
+        x_u = X[:, :, None, :].expand(b_samples, num_nodes, self.sample_num, Fdim)
+
+        safe_cols = cand_cols.clamp_min(0)
+        X_flat = X.reshape(b_samples * num_nodes, Fdim)  # (B*N, F)
+        offset = (torch.arange(b_samples, device=device) * num_nodes)[:, None, None]  # (B,1,1)
+        flat_idx = safe_cols + offset  # (B,N,K) -> 指向 X_flat 的行号
+        x_v = X_flat[flat_idx.reshape(-1)].reshape(b_samples, num_nodes, self.sample_num, Fdim)  # (B,N,K,F)
+        # x_v = X.gather(1, safe_cols[..., None].expand(b_samples, num_nodes, self.sample_num, Fdim))  # (B,N,Kcand,F)
+
+        pair = torch.cat([x_u, x_v], dim=-1)  # (B,N,Kcand,2F)
+        logits = self.mlp(pair).squeeze(-1)  # (B,N,Kcand)
+
+        neg_inf = torch.finfo(logits.dtype).min
+        logits = logits.masked_fill(~cand_mask, neg_inf)
+
+        # Gumbel + topk 选 edge_num 条
+        eps = 1e-12
+        U = torch.rand_like(logits).clamp_(min=eps, max=1 - eps)
+        g = -torch.log(-torch.log(U))
+        y = (logits + g) / max(tau_gumbel, 1e-8)
+
+        k_pick = min(self.edge_num, self.sample_num)
+        pick_idx = torch.topk(y, k=k_pick, dim=-1).indices
+        learn_cols = safe_cols.gather(-1, pick_idx)  # (B,N,k_pick)
+
+        learn_adj = torch.zeros(b_samples, num_nodes, num_nodes, device=device, dtype=torch.float32)
+        learn_adj[bat_id, row_id, learn_cols] = 1.0
+
+        # 避免和固定最相似边重复（可选，但跟你原来一致）
+        learn_adj = learn_adj * (1.0 - fix_adj)
+
+        # ----- 5) 合并为最终无权重图 -----
+        coe_Adj = (fix_adj + learn_adj > 0).to(torch.float32)
+
+
+        # # Build edge mask E (B,N,N)
+        # edges = Adj.bool()
+        # edge_feat = None
+        #
+        #
+        # # print(datetime.now(), "节点边扩展开始")
+        # # Pair features (dense): (B,N,N,dn) + (B,N,N,dn) (+ edge_feat)
+        # Xu = X.unsqueeze(2).expand(b_samples, num_nodes, num_nodes, X.size(-1))  # u repeated along v
+        # Xv = X.unsqueeze(1).expand(b_samples, num_nodes, num_nodes, X.size(-1))  # v repeated along u
+        #
+        # pair = torch.cat([Xu, Xv], dim=-1)
+        # # print(datetime.now(), "节点边扩展完成")
+        #
+        # # print(datetime.now(), "全连接学习边开始")
+        # # Edge logits z_{u,v}  (论文 Eq.4) :contentReference[oaicite:6]{index=6}
+        # logits = self.mlp(pair).squeeze(-1)  # (B,N,N)
+        # # print(datetime.now(), "全连接学习边完成")
+        #
+        # # Mask non-neighbors to -inf so they won't be selected
+        # neg_inf = torch.finfo(logits.dtype).min
+        # logits = logits.masked_fill(~edges, neg_inf)
+        #
+        # # print(datetime.now(), "Gumbel开始")
+        # # Gumbel trick
+        # g = sample_gumbel(logits.shape, device=device)
+        # y = (logits + g) / max(tau, 1e-8)
+        # # print(datetime.now(), "Gumbel完成")
+        #
+        # if hard:
+        #     # Hard top-k per node (u): sample without replacement by topk on (logits+gumbel)
+        #     # 与论文“每个节点最多选 k 条边”一致 :contentReference[oaicite:7]{index=7}
+        #     idx = y.topk(k=min(self.edge_num, num_nodes), dim=-1).indices  # (B,N,k)
+        #     mask = torch.zeros((b_samples, num_nodes, num_nodes), device=device, dtype=torch.float32)
+        #     mask.scatter_(dim=-1, index=idx, value=1.0)
+        #     # 如果某些节点度数 < k，topk 会带进 -inf 的位置；乘 E 清掉即可
+        #     mask = mask * edges.float()
+        # else:
+        #     # Soft weights: Gumbel-Softmax over neighbors (论文 Eq.6) :contentReference[oaicite:8]{index=8}
+        #     w = fun.softmax(y, dim=-1)  # sums to 1 over all v (non-edges≈0)
+        #     # 让“期望保留边数≈k”：用 k 倍缩放再截断到 1（工程上的常用近似）
+        #     mask = (w * float(self.edge_num)).clamp(max=1.0) * edges.float()
+
+        # mask[bat_id, sensor_id, topk] = 0
+        #
+        # coe_Adj = mask + new_coe_Adj
         # print(datetime.now(), "图学习完成")
         return coe_Adj
 
