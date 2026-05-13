@@ -35,10 +35,14 @@ class GraphMambaGMN(nn.Module):
             BidirectionalMamba(configs)
             for _ in range(configs.num_global_layers)
         ])
-        if configs.use_mpnn:
-            self.mpnn = MPNN_nk(configs.hidden_channels, d_model, configs.mpnn_layer)
+        self.use_mpnn = bool(getattr(configs, "use_mpnn", 0))
+        mpnn_layer = max(1, getattr(configs, "mpnn_layer", 1))
+        if self.use_mpnn:
+            self.mpnn = MPNN_nk(configs.hidden_channels, d_model, mpnn_layer)
+            self.refine_mpnn = MPNN_nk(d_model, d_model, mpnn_layer)
         else:
             self.mpnn = None
+            self.refine_mpnn = None
 
         self.proj = nn.Sequential(
             nn.Linear(d_model, d_model),
@@ -52,7 +56,6 @@ class GraphMambaGMN(nn.Module):
         self.seed = args.seed
         self.configs = configs
         self.d_model = d_model
-        self.use_mpnn = None
 
         self.convo_time_length = configs.convo_time_length
 
@@ -132,7 +135,7 @@ class GraphMambaGMN(nn.Module):
         edge_index_list = []
         # print(datetime.now(), "mamba训练开始")
         # print(b_samples, "每批次样本数")
-        node_token_feats_list, perm_batch_list, inv_perm_batch_list, edge_index_list = self.Graph_del(x, adj_1, b_samples, num_node, device)
+        node_token_feats_list, perm_batch_list, inv_perm_batch_list, edge_index_list = self.Graph_del(x, adj_1, b_samples, num_node, device, rng)
 
         # print(datetime.now(), "子图构建及编码完成")
 
@@ -172,7 +175,7 @@ class GraphMambaGMN(nn.Module):
                 h_b = node_repr_global_1[b]  # (N, D)
                 edge_index_b = edge_index_list[b]
                 if edge_index_b is not None and edge_index_b.numel() > 0:
-                    mpnn_out_b = self.mpnn(h_b, edge_index_b)
+                    mpnn_out_b = self.refine_mpnn(h_b, edge_index_b)
                     new_repr_b = h_b + fun.relu(mpnn_out_b)
                 else:
                     new_repr_b = h_b
@@ -181,7 +184,7 @@ class GraphMambaGMN(nn.Module):
 
         # node_repr_global = self.proj(node_repr_global)
 
-        node_token_feats_list, perm_batch_list, inv_perm_batch_list, edge_index_list = self.Graph_del(x, adj_2, b_samples, num_node, device)
+        node_token_feats_list, perm_batch_list, inv_perm_batch_list, edge_index_list = self.Graph_del(x, adj_2, b_samples, num_node, device, rng)
 
 
         node_token_feats = torch.stack(node_token_feats_list, dim=0)  # (B, N, L, d_model)
@@ -215,7 +218,7 @@ class GraphMambaGMN(nn.Module):
                 h_b = node_repr_global_2[b]  # (N, D)
                 edge_index_b = edge_index_list[b]
                 if edge_index_b is not None and edge_index_b.numel() > 0:
-                    mpnn_out_b = self.mpnn(h_b, edge_index_b)
+                    mpnn_out_b = self.refine_mpnn(h_b, edge_index_b)
                     new_repr_b = h_b + fun.relu(mpnn_out_b)
                 else:
                     new_repr_b = h_b
@@ -229,7 +232,7 @@ class GraphMambaGMN(nn.Module):
         return node_repr_global_1, loss_con
 
 
-    def Graph_del(self, x, adj, b_samples, num_node, device):
+    def Graph_del(self, x, adj, b_samples, num_node, device, rng):
         node_token_feats_list = []
         perm_batch_list = []
         inv_perm_batch_list = []
@@ -244,8 +247,17 @@ class GraphMambaGMN(nn.Module):
             # print(datetime.now(), "子图构建完成")
             # print(datetime.now(), "子图编码开始")
             # print(datetime.now(), "GNN开始")
-            neighbor_edge = tc._build_edge_index_from_matrix(adj_b)
-            neigh_nodes = self.mpnn(x_b, neighbor_edge)
+            neighbor_edge = tc._build_edge_index_from_matrix(adj_b).to(device)
+            if self.use_mpnn and self.mpnn is not None:
+                neigh_nodes = self.mpnn(x_b, neighbor_edge)
+                node_token_feats_b = neigh_nodes.unsqueeze(1)  # (N, 1, D)
+            else:
+                adj_list_b = tc._build_adj_list_from_matrix(adj_b)
+                tokens_per_node_b = tc._sample_tokens_for_all_nodes(num_node, self.configs, adj_list_b, rng)
+                node_token_feats_b = self._encode_subgraph_tokens_single(
+                    x_single=x_b,
+                    tokens_per_node=tokens_per_node_b,
+                )  # (N, L, D)
             # print(datetime.now(), "GNN完成")
 
             # 子图编码
@@ -253,7 +265,6 @@ class GraphMambaGMN(nn.Module):
             #     x_single=x_b,
             #     tokens_per_node=tokens_per_node_b,
             # )  # (N, L, d_model)
-            node_token_feats_b = neigh_nodes.unsqueeze(1)  # (N, 1, D)
             # node_token_feats_b = torch.cat([neigh_tok, node_token_feats_b], dim=1)  # (N, L+1, D)
             node_token_feats_list.append(node_token_feats_b)
             # print(datetime.now(), "子图编码开始")
@@ -274,15 +285,16 @@ class GraphMambaGMN(nn.Module):
             #     inv_perm_b[perm_b] = torch.arange(num_nodes, dtype=torch.long)
 
             # 不做度排序
-            perm_b = torch.arange(num_node, device=device, dtype=torch.long)  # (N,)
-            inv_perm_b = perm_b.clone()  # (N,)
+            weight_sums = adj_b.sum(dim=-1)
+            perm_b = torch.argsort(weight_sums, descending=False)
+            inv_perm_b = torch.empty_like(perm_b)
+            inv_perm_b[perm_b] = torch.arange(num_node, device=device, dtype=torch.long)
 
             perm_batch_list.append(perm_b)
             inv_perm_batch_list.append(inv_perm_b)
 
             if self.use_mpnn and self.mpnn is not None:
-                edge_index_b = self._build_edge_index_from_matrix_2d(adj_b).to(device)
-                edge_index_list.append(edge_index_b)
+                edge_index_list.append(neighbor_edge)
             else:
                 edge_index_list.append(None)
         return node_token_feats_list, perm_batch_list, inv_perm_batch_list, edge_index_list
@@ -314,7 +326,7 @@ class BidirectionalMamba(nn.Module):
         y_bwd = torch.flip(y_bwd_rev, dims=[1])
 
         y = 0.5 * (y_fwd + y_bwd)
-        return y
+        return x + y
 
 
 

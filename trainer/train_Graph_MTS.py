@@ -8,23 +8,27 @@ from collections import Counter
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import time
+from contextlib import nullcontext
 
 
 def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, args):
     # writer = SummaryWriter("runs/mem")
     # global_step = 0
     logger.debug("Training started ....")
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=getattr(configs, "label_smoothing", 0.0))
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(model_optimizer, 'min')
     cross_accu = 0
     test_accu_ = []
     prediction_ = []
     labels = []
+    scaler = torch.amp.GradScaler(device.type, enabled=device.type == "cuda")
+    best_test_accu = 0
+    best_test_f1 = 0
 
     for epoch in range(1, configs.num_epoch + 1):
         # train_sampler.set_epoch(epoch)
         # test_sampler.set_epoch(epoch)
-        loss = model_train(model, model_optimizer, criterion, train_dl, device)
+        loss = model_train(model, model_optimizer, criterion, train_dl, device, configs, scaler)
 
         if epoch % configs.show_interval == 0:
             accu_val = Cross_validation(model, train_dl, device)
@@ -36,7 +40,10 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
             # if accu_val > cross_accu:
             cross_accu = accu_val
             test_loss, test_accu, test_f1, prediction, real = Prediction(model, criterion, test_dl, device)
-            scheduler.step(test_loss)
+            scheduler.step(loss)
+            if test_accu > best_test_accu:
+                best_test_accu = test_accu
+                best_test_f1 = test_f1
             if is_main:
                 logger.debug('{} In the {}th epoch, TESTING accuracy is {}%'.format(datetime.now(), epoch, np.round(test_accu, 3)))
                 logger.debug('{} In the {}th epoch, TESTING MacroF1 is {}%'.format(datetime.now(), epoch, np.round(test_f1, 3)))
@@ -45,10 +52,10 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
             labels.append(real)
 
     logger.debug("\n################## Training is Done! #########################")
+    logger.debug('Best TESTING accuracy is {}%, MacroF1 is {}%'.format(np.round(best_test_accu, 3), np.round(best_test_f1, 3)))
 
 
-def model_train(model, model_optimizer, criterion, train_loader, device):
-    scaler = torch.amp.GradScaler('cuda')
+def model_train(model, model_optimizer, criterion, train_loader, device, configs, scaler):
     model.train()
     # num = int(len(train_loader.dataset) * 0.8)
     # print("train_loader.dataset", len(train_loader.dataset))
@@ -61,12 +68,23 @@ def model_train(model, model_optimizer, criterion, train_loader, device):
         #     break
         data, labels = data.float().to(device, non_blocking=True), labels.long().to(device, non_blocking=True)
         model_optimizer.zero_grad()
-        with torch.amp.autocast('cuda', dtype=torch.float16):
+        amp_context = (
+            torch.amp.autocast(device_type=device.type, dtype=torch.float16)
+            if device.type == "cuda"
+            else nullcontext()
+        )
+        with amp_context:
             prediction = model(data)
             # print("prediction", prediction)
             # print("labels", labels)
             loss = criterion(prediction, labels)
+            aux_loss = getattr(model, "aux_loss", None)
+            if aux_loss is not None:
+                loss = loss + getattr(configs, "contrastive_weight", 0.05) * aux_loss
         scaler.scale(loss).backward()
+        if getattr(configs, "grad_clip_norm", 1.0) is not None:
+            scaler.unscale_(model_optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), getattr(configs, "grad_clip_norm", 1.0))
         scaler.step(model_optimizer)
         scaler.update()
         # prediction = model(data)
@@ -134,12 +152,7 @@ def Prediction(model, criterion, test_loader, device):
 
 
 def accu_cal(predicted, real):
-    num = predicted.size(0)
-    real_num = 0
-    for i in range(num):
-        if predicted[i] == real[i]:
-            real_num += 1
-    return 100 * real_num / num
+    return (predicted == real).float().mean().item() * 100
 
 
 def accu_F1(predicted, real):

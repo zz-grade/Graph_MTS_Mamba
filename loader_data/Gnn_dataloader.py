@@ -48,8 +48,9 @@ class Load_Training_Data(Dataset):
 
 
         if configs.wavelet_aug:
-            x_train_aug1 = x_train.numpy()
-            x_train_aug2 = x_train.numpy()
+            x_train_np = x_train.detach().cpu().numpy() if torch.is_tensor(x_train) else x_train
+            x_train_aug1 = x_train_np.copy()
+            x_train_aug2 = x_train_np.copy()
             x_train_aug1 = wavelet_transform(x_train_aug1, True)
             x_train_aug2 = wavelet_transform(x_train_aug2, False)
             x_train_aug1 = torch.from_numpy(x_train_aug1)
@@ -117,7 +118,8 @@ def data_generator2(data_path, configs, args):
 
     train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=getattr(configs, "batch_size_test", configs.batch_size),
+                             shuffle=False, drop_last=False, num_workers=0)
 
     return train_loader, val_loader, test_loader
 
@@ -131,6 +133,7 @@ def data_generator(data_path, configs, args):
     test_dataset = Load_Training_Data(test_dataset, configs, args)
 
     train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=getattr(configs, "batch_size_test", configs.batch_size),
+                             shuffle=False, drop_last=False, num_workers=0)
 
     return train_loader, test_loader

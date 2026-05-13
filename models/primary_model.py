@@ -24,15 +24,21 @@ class Base_model(nn.Module):
         num_classes = configs.num_classes
         self.nonlin_map = nn.Linear(configs.window_size, configs.window_size)
         self.hidden_dim = configs.hidden_channels
-        self.output_dim = configs.final_out_channels
+        self.output_dim = configs.dimension_token
         self.time_length = configs.convo_time_length
         self.Time_Graph_contrustion = Feature_extractor_1DCNN_Tiny(configs.window_size, 32, configs.hidden_channels,
                                                                    configs.kernel_size, configs.stride, configs.dropout)
-        self.sparseEdge = NeuralSparseSparsifier(configs.edge_num, configs.similar_edge, configs.hidden_channels)
+        self.sparseEdge = NeuralSparseSparsifier(
+            configs,
+            getattr(configs, "edge_num", None),
+            getattr(configs, "similar_edge", None),
+            configs.hidden_channels,
+        )
         self.Graph_Mamba = GraphMambaGMN(configs, args)
-        self.logits = nn.Linear(configs.convo_time_length * configs.final_out_channels * configs.num_nodes,
+        self.logits = nn.Linear(configs.convo_time_length * self.output_dim * configs.num_nodes,
                                 configs.num_classes)
         self.seed = args.seed
+        self.aux_loss = None
 
     def forward(self, data, num_remain=None):
         # data = torch.transpose(data, 2, 1)  # (b_samples, num_nodes, time_length, dimension)
@@ -73,15 +79,16 @@ class Base_model(nn.Module):
         # Adj_input = disturbance_correlations(Adj_input, num_remain)
 
         GC_input = torch.reshape(GC_input, [-1, num_nodes, self.hidden_dim])
-        Adj_output = self.sparseEdge(GC_input, Adj_input)
+        Adj_output_1 = self.sparseEdge(GC_input, Adj_input)
+        Adj_output_2 = self.sparseEdge(GC_input, Adj_input)
         # print(datetime.now(), "构建时间戳图完成")
         rng = random.Random(self.seed)
-        GC_output = self.Graph_Mamba(GC_input, Adj_output, rng)
+        GC_output, contrastive_loss = self.Graph_Mamba(GC_input, Adj_output_1, Adj_output_2, rng)
+        self.aux_loss = contrastive_loss
         # GC_output = checkpoint(lambda x: self.Graph_Mamba(x, Adj_input), GC_input)
         GC_output = torch.reshape(GC_output, [b_samples, -1, num_nodes, self.output_dim])
         logits_input = torch.reshape(GC_output, [b_samples, -1])
         # print(datetime.now(), "mamba提取完成")
         logits = self.logits(logits_input)
 
-        logits.std()
         return logits
