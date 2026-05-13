@@ -1,9 +1,13 @@
+import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 import argparse
 from datetime import datetime
 import numpy as np
-from models.primary_model import Base_model
+from models.primary_model import Base_model, Base_model02
 from trainer.train_Graph_MTS import Trainer
 from utils import _logger, set_requires_grad
 from huggingface_hub.utils import experimental
@@ -11,6 +15,17 @@ from torch_geometric.datasets import KarateClub
 import os
 from loader_data.Gnn_dataloader import data_generator
 
+
+# def setup_ddp():
+#     dist.init_process_group(backend="nccl")
+#     local_rank = int(os.environ["LOCAL_RANK"])
+#     torch.cuda.set_device(local_rank)
+#     device = torch.device("cuda", local_rank)
+#     return local_rank, device
+
+
+# def cleanup_ddp():
+#     dist.destroy_process_group()
 
 start_time = datetime.now()
 
@@ -31,10 +46,12 @@ parser.add_argument('--device', default='cuda', type=str,
                     help='cpu or cuda')
 parser.add_argument('--home_path', default=home_dir, type=str,
                     help='Project home directory')
+parser.add_argument('--gpu', default=1, type=int)
 
 
 def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug2):
-    device = torch.device(args.device)
+    # device = torch.device(args.device)
+    device = torch.device(f'cuda:{args.gpu}' if torch.cuda.is_available() else 'cpu')
     experiment_description = args.experiment_description
     method = 'GCC'
     training_mode = args.training_mode
@@ -42,11 +59,15 @@ def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug
     logs_save_dir = args.logs_save_dir
     os.makedirs(logs_save_dir, exist_ok = True)
 
-    SEED = args.seed
+
+    SEED = 0
     torch.manual_seed(SEED)
-    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     np.random.seed(SEED)
+    torch.cuda.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    torch.use_deterministic_algorithms(True)
 
     experiment_log_dir = os.path.join(logs_save_dir, experiment_description, run_description,
                                       training_mode + f"_seed_{SEED}")
@@ -60,21 +81,29 @@ def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug
     logger.debug(f'Mode:    {training_mode}')
     logger.debug("=" * 45)
 
+    # local_rank, device = setup_ddp()
 
     data_path = f"./data/{data_type}"
-    train_dl, test_dl = data_generator("/data/user_zhangzhe/data/FingerMovements", configs, args)
+    # train_dl, val_dl, test_dl = data_generator("/data/user_zhangzhe/data/Libras", configs, args)
+    train_dl, test_dl = data_generator("/data/user_zhangzhe/data/FaceDetection", configs, args)
 
     logger.debug("Data loaded ...")
 
-    model = Base_model(configs, args).to(device)
+
+
+
+    model = Base_model(configs, args, device).to(device)
+    model = model.to(device)
+    # model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
     model_optimizer = torch.optim.Adam(model.parameters(), lr=configs.lr, betas=(configs.beta1, configs.beta2),
-                                       weight_decay=3e-4)
+                                       weight_decay=configs.weight_decay)
 
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
+    # Trainer(model, model_optimizer, train_dl, val_dl, test_dl, device, logger, configs, args)
     Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, args)
 
 
@@ -92,7 +121,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    args.selected_dataset = 'FingerMovements'
+    args.selected_dataset = 'FaceDetection'
     data_type = args.selected_dataset
     exec(f'from config_files.{data_type}_Configs import Config as Configs')
     configs = Configs()
