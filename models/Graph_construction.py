@@ -5,6 +5,8 @@ from datetime import datetime
 import math
 import copy
 
+from models.augmentation import candidate_adj_contrastive_loss_fast
+
 
 class transformer_construction(nn.Module):
     def __init__(self, input_dimension, hidden_dimension, num_heads):
@@ -51,191 +53,366 @@ class NeuralSparseSparsifier(nn.Module):
         self.max_hop = configs.max_hop
         self.ran_num = configs.ran_num
         self.sample_num = configs.sample_num
+        # 让 alpha 也变成可学习（可选）
+        self.log_alpha = nn.Parameter(torch.log(torch.tensor(0.1, dtype=torch.float32)))
+        # 控制自学习边权影响强度
+        self.log_beta = nn.Parameter(torch.log(torch.tensor(0.8, dtype=torch.float32)))
 
+        # 根据一条边两端节点特征，学习这条边的 gate
+        # 输入维度 = x_src + x_dst + |x_src-x_dst| + x_src*x_dst + dt + prior_w
+        #         = 4*D + 2
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(configs.hidden_channels * 4 + 2, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
 
-    def forward(self, X, Adj, tau_gumbel=1.0, tau_walk=1.0, hard=True, uniform_walk=True):
+    def forward(self, X, Adj, num_nodes, self_loop=False, edge_eps=0.0):
         """
-        X:   (B, N, d_n) node features
-        Adj: (B, N, N)   adjacency mask (0/1) OR
-             (B, N, N, d_e) edge features (0 for non-edges)
-        k:   keep at most k outgoing edges per node
-        tau: temperature (论文建议训练时从大到小退火) :contentReference[oaicite:5]{index=5}
-        hard:
-          - True: hard top-k mask (0/1)
-          - False: soft weights (continuous)
-        return:
-          mask: (B, N, N)  (float in [0,1])
-          (optional) Adj_sparse if Adj has edge features
+        X:   (B, T*N, D)
+        Adj: (B, T*N, T*N)
+        num_nodes: 每个时间步的节点数 N
         """
-        b_samples, num_nodes, Fdim = X.shape
+        b_samples, total_nodes, feat_dim = X.shape
         device = X.device
 
-        # ----------  固定最相似边 ----------
-        topk = Adj.topk(self.similar_edge, dim=-1).indices
-        bat_id = torch.arange(b_samples, device=device)[:, None, None]  # (B,1,1)
-        row_id = torch.arange(num_nodes, device=device)[None, :, None]  # (1,N,1)
-        fix_cols = Adj.topk(k=self.similar_edge, dim=-1).indices  # (B,N,k_fix)
-        fix_adj = torch.zeros(b_samples, num_nodes, num_nodes, device=device, dtype=torch.float32)
-        fix_adj[bat_id, row_id, fix_cols] = 1.0
+        assert num_nodes is not None
+        assert total_nodes % num_nodes == 0
 
-        # -----  随机游走：预计算转移分布 probs[b,u,:] -----
-        if uniform_walk:
-            # 均匀：每步从 N-1 个节点里等概率选（这里用 multinomial 需要 probs）
-            probs = torch.ones((b_samples, num_nodes, num_nodes), device=device, dtype=torch.float32)
-            probs.diagonal(dim1=-2, dim2=-1).zero_()
-            probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        alpha = self.log_alpha.exp()
+        beta = self.log_beta.exp()
+
+        # -------------------------------------------------
+        # 1) 先从原始 Adj 取候选边，不构造完整 time_dist / Adj_decay
+        # -------------------------------------------------
+        if self_loop:
+            edge_mask = Adj > 0
         else:
-            # 加权：用 softmax(A/tau_walk) 作为转移概率（A 越大越容易走到）
-            A = Adj.float()
-            probs = torch.softmax(A / max(tau_walk, 1e-8), dim=-1).to(torch.float32)
+            edge_mask = Adj > 0
+            diag_mask = ~torch.eye(total_nodes, device=device, dtype=torch.bool).unsqueeze(0)
+            edge_mask = edge_mask & diag_mask
 
-        # ----- 随机游走收集候选 cand_cols (B,N,Kcand) -----
-        cand_cols = torch.full((b_samples, num_nodes, self.sample_num), -1, device=device, dtype=torch.long)
-        cand_mask = torch.zeros((b_samples, num_nodes, self.sample_num), device=device, dtype=torch.bool)
+        b_idx, src, dst = edge_mask.nonzero(as_tuple=True)  # (E,)
 
-        # cur: (B,N,W)  每个节点 u 启动 W 条 walk，初始都在 u
-        cur = torch.arange(num_nodes, device=device, dtype=torch.long)[None, :, None].expand(b_samples, num_nodes, self.ran_num).clone()
+        # -------------------------------------------------
+        # 2) 逐边计算时间差 dt，而不是构造 (TN, TN) 的 time_dist
+        # -------------------------------------------------
+        t_src = torch.div(src, num_nodes, rounding_mode='floor')
+        t_dst = torch.div(dst, num_nodes, rounding_mode='floor')
+        dt = (t_src - t_dst).abs().to(X.dtype)  # (E,)
 
-        b_idx = torch.arange(b_samples, device=device)[:, None, None].expand(b_samples, num_nodes, self.ran_num)  # (B,N,W)
-        u_idx = torch.arange(num_nodes, device=device)[None, :, None].expand(b_samples, num_nodes, self.ran_num)  # (B,N,W)
+        # -------------------------------------------------
+        # 3) 逐边计算时间衰减后的先验边权
+        # -------------------------------------------------
+        adj_raw = Adj[b_idx, src, dst]  # (E,)
+        prior_w = adj_raw * torch.exp(-alpha * dt)  # (E,)
 
-        # 每一步把所有 (B,N,W) 同时走一步，并把访问到的节点记录下来
-        visited_steps = []
-        for _ in range(self.max_hop):
-            # dist: (B,N,W,N)  当前所在节点的转移分布
-            dist = probs[b_idx, cur]  # 高级索引取 probs[b, cur, :]
-            dist_flat = dist.reshape(-1, num_nodes)  # (B*N*W, N)
+        # 如果 edge_eps 的语义是“衰减后的边权阈值”，在这里再筛一次
+        if edge_eps > 0:
+            keep = prior_w > edge_eps
+            b_idx = b_idx[keep]
+            src = src[keep]
+            dst = dst[keep]
+            dt = dt[keep]
+            prior_w = prior_w[keep]
 
-            nxt_flat = torch.multinomial(dist_flat, num_samples=1, replacement=True).squeeze(-1)  # (B*N*W,)
-            cur = nxt_flat.view(b_samples, num_nodes, self.ran_num)  # (B,N,W)
+        # -------------------------------------------------
+        # 4) batched graph -> 大图编号
+        # -------------------------------------------------
+        offset = b_idx * total_nodes
+        src_big = src + offset
+        dst_big = dst + offset
+        edge_index_big = torch.stack([src_big, dst_big], dim=0).long()
 
-            visited_steps.append(cur)
+        # -------------------------------------------------
+        # 5) 逐边取节点特征
+        # -------------------------------------------------
+        x_src = X[b_idx, src]  # (E, D)
+        x_dst = X[b_idx, dst]  # (E, D)
 
-        # visited: (B,N,W,L) -> (B,N,T)
-        visited = torch.stack(visited_steps, dim=-1).reshape(b_samples, num_nodes, self.ran_num * self.max_hop)
-        T = visited.size(-1)
+        # -------------------------------------------------
+        # 6) 自学习边权
+        # -------------------------------------------------
+        dt_feat = dt.unsqueeze(-1)  # (E, 1)
+        prior_feat = prior_w.unsqueeze(-1)  # (E, 1)
 
-        # 从 visited 中按顺序填充 cand_cols 的 K 个槽位：去掉 self + 去重
-        # （K 很小，比如 5；T=W*L 也不大，循环开销非常小）
-        self_id = torch.arange(num_nodes, device=device)[None, :, None]  # (1,N,1)
+        edge_feat = torch.cat([
+            x_src,
+            x_dst,
+            torch.abs(x_src - x_dst),
+            x_src * x_dst,
+            dt_feat,
+            prior_feat
+        ], dim=-1)  # (E, 4D+2)
 
-        for t in range(T):
-            v = visited[:, :, t]  # (B,N)
+        learned_logit = self.edge_mlp(edge_feat).squeeze(-1)
+        learned_gate = 1.0 + torch.tanh(beta * learned_logit)
+        edge_weight = prior_w * learned_gate
 
-            # 过滤自环
-            valid = (v != self_id.squeeze(-1))
-
-            # 过滤重复：如果 v 已经在 cand_cols 里，跳过
-            already = (cand_cols == v.unsqueeze(-1)).any(dim=-1)  # (B,N)
-            can_use = valid & (~already)
-
-            # 依次填第一个空位
-            for k in range(self.sample_num):
-                empty = cand_cols[:, :, k] < 0  # (B,N)
-                put = can_use & empty  # (B,N)
-                if not put.any():
-                    continue
-                cand_cols[:, :, k] = torch.where(put, v, cand_cols[:, :, k])
-                cand_mask[:, :, k] = cand_mask[:, :, k] | put
-
-                # 同一个 (b,u) 的这个 v 放进一个槽后，就不要再放到后面槽
-                can_use = can_use & (~put)
-
-            # 如果全部填满了，可以提前停（可选）
-            if (cand_cols[:, :, -1] >= 0).all():
-                break
+        return edge_index_big, edge_weight
 
 
-        # ----- 4) 在候选边上用 MLP 学习挑选 edge_num 条（不做 N×N pair！） -----
-        # x_u: (B,N,Kcand,F)
-        x_u = X[:, :, None, :].expand(b_samples, num_nodes, self.sample_num, Fdim)
+class NeuralSparseSparsifier_Mul(nn.Module):
 
-        safe_cols = cand_cols.clamp_min(0)
-        X_flat = X.reshape(b_samples * num_nodes, Fdim)  # (B*N, F)
-        offset = (torch.arange(b_samples, device=device) * num_nodes)[:, None, None]  # (B,1,1)
-        flat_idx = safe_cols + offset  # (B,N,K) -> 指向 X_flat 的行号
-        x_v = X_flat[flat_idx.reshape(-1)].reshape(b_samples, num_nodes, self.sample_num, Fdim)  # (B,N,K,F)
-        # x_v = X.gather(1, safe_cols[..., None].expand(b_samples, num_nodes, self.sample_num, Fdim))  # (B,N,Kcand,F)
+    def __init__(self, configs, edge_num, similar_edge, node_dim, edge_dim=0, hidden=128):
+        super().__init__()
+        in_dim = 2 * configs.hidden_channels + edge_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
 
-        pair = torch.cat([x_u, x_v], dim=-1)  # (B,N,Kcand,2F)
-        logits = self.mlp(pair).squeeze(-1)  # (B,N,Kcand)
+        # 共享边特征抽取
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.ReLU(),
+        )
+
+        # 用于“选边”
+        self.edge_score_head = nn.Linear(hidden, 1)
+
+        # 用于“消息传递边权”
+        self.edge_weight_head = nn.Linear(hidden, 1)
+
+        self.edge_num = configs.edge_num
+        self.similar_edge = configs.similar_edge
+        self.random_edge = configs.random_edge
+        self.max_hop = configs.max_hop
+        self.ran_num = configs.ran_num
+        self.sample_num = configs.sample_num
+
+    def forward(self, X, Adj, tau=1.0, hard=False, self_loop=False, edge_eps=0.0):
+        """
+        返回:
+          edge_index_big: (2, E)  batched edge_index，节点编号范围 [0, B*N-1]
+        可选:
+          edge_eps: coe_Adj > edge_eps 才认为有边（默认 0，即只要 >0 就算边）
+        """
+        device = X.device
+        B, N, Fdim = X.shape
+
+        # --------------------------------------------------
+        # 1) 先取相似候选边
+        # --------------------------------------------------
+        A_sim = Adj.clone()
+
+        K_sim = min(self.similar_edge, N)
+        sim_cols = A_sim.topk(k=K_sim, dim=-1).indices  # (B, N, K_sim)
+
+        # --------------------------------------------------
+        # 2) 再采样随机候选边（不和 sim_cols/self 重复）
+        # --------------------------------------------------
+        K_rand = self.random_edge
+
+        if K_rand > 0:
+
+            # 多采一点，后面过滤重复 / self 后再截断
+            sample_mul = 3
+            K_pool = K_rand * sample_mul
+
+            # 直接随机采样候选列，不再构造 (B,N,N) 的完整随机矩阵
+            rand_pool = torch.randint(
+                low=0,
+                high=N,
+                size=(B, N, K_pool),
+                device=device
+            )  # (B,N,K_pool)
+
+            # allowed[b, i, j] = True 表示节点 i 可以选 j 作为随机邻居
+            allowed = torch.ones(B, N, N, device=device, dtype=torch.bool)
+
+            # 去掉 sim 邻居，避免重复
+            allowed.scatter_(
+                dim=-1,
+                index=sim_cols,
+                src=torch.zeros_like(sim_cols, dtype=torch.bool)
+            )
+
+            # 1) 去掉 self
+            valid_mask = torch.ones(B, N, K_pool, device=device, dtype=torch.bool)
+            if not self_loop:
+                rows = torch.arange(N, device=device)[None, :, None]  # (1,N,1)
+                valid_mask &= (rand_pool != rows)
+
+            # 2) 去掉和 sim_cols 重复的随机边
+            if sim_cols.size(-1) > 0:
+                dup_with_sim = (rand_pool.unsqueeze(-1) == sim_cols.unsqueeze(-2)).any(dim=-1)  # (B,N,K_pool)
+                valid_mask &= (~dup_with_sim)
+
+            # 3) 先把非法位置置成 -1
+            rand_pool = rand_pool.masked_fill(~valid_mask, -1)
+
+            # 4) 去重：排序后，相邻相同元素视为重复
+            rand_pool_sorted, _ = rand_pool.sort(dim=-1)  # (B,N,K_pool)
+
+            dup_inside = torch.zeros_like(rand_pool_sorted, dtype=torch.bool)
+            dup_inside[..., 1:] = (rand_pool_sorted[..., 1:] == rand_pool_sorted[..., :-1])
+            rand_pool_sorted = rand_pool_sorted.masked_fill(dup_inside, -1)
+
+            # 5) 把有效值移到前面，无效值(-1)放后面
+            valid_after = rand_pool_sorted >= 0
+            order = (~valid_after).long().argsort(dim=-1, stable=True)
+            rand_pool_compact = rand_pool_sorted.gather(-1, order)
+
+            # 6) 截取前 K_rand 个
+            K_rand_keep = min(K_pool, K_rand * 2)
+            rand_cols = rand_pool_compact[..., :K_rand_keep]
+
+        # --------------------------------------------------
+            # 3) 合并候选边：相似边 + 随机边
+            # --------------------------------------------------
+        cand_cols = torch.cat([sim_cols, rand_cols], dim=-1)  # (B,N,Kcand)
+        Kcand = cand_cols.size(-1)
+
+        if Kcand == 0:
+            # 没候选边，直接返回空图
+            edge_index_big = torch.empty(2, 0, dtype=torch.long, device=device)
+            edge_weight_big = torch.empty(0, dtype=X.dtype, device=device)
+            return edge_index_big, edge_weight_big
+
+        # cand_mask = torch.ones(B, N, Kcand, device=device, dtype=torch.bool)
+        cand_mask = (cand_cols >= 0) & (cand_cols < N)
+        if not self_loop:
+            rows = torch.arange(N, device=device)[None, :, None].expand(B, N, Kcand)
+            cand_mask = cand_mask & (cand_cols != rows)
+
+        # 给所有 gather/index 用安全索引
+        safe_cols = cand_cols.clamp(min=0, max=N - 1).long()
+
+        # --------------------------------------------------
+        # 4.5) 结构对比损失：拉开候选边内部的原始 Adj 差距
+        # --------------------------------------------------
+        loss_struct = candidate_adj_contrastive_loss_fast(
+            Adj=Adj,
+            cand_cols=safe_cols,
+            cand_mask=cand_mask,
+            pos_ratio=0.3,
+            neg_ratio=0.3,
+            margin=0.2,
+            min_pos=1,
+            min_neg=1
+        )
+
+        # --------------------------------------------------
+        # 4) 取候选边两端节点特征，MLP 打分
+        # --------------------------------------------------
+        x_u = X[:, :, None, :].expand(B, N, Kcand, Fdim)  # (B,N,K,F)
+
+        X_flat = X.reshape(B * N, Fdim)
+        offset = (torch.arange(B, device=device) * N)[:, None, None]  # (B,1,1)
+        flat_idx = (safe_cols + offset).reshape(-1)  # (B*N*K,)
+        x_v = X_flat[flat_idx].reshape(B, N, Kcand, Fdim)  # (B,N,K,F)
+
+        # 从 Adj 中取候选边对应的结构分数
+        adj_score = Adj.gather(-1, safe_cols)   # (B,N,K)
+        adj_score = adj_score.masked_fill(~cand_mask, 0.0)
+
+        # 方法一：把边信息作为 MLP 输入，而不是后面再加
+        pair = torch.cat([x_u, x_v], dim=-1)  # (B,N,K,2F+1)
+
+        pair_feat = self.edge_mlp(pair)  # (B,N,K,H)
+
+        # 1) 用于选边的分数
+        # logits = self.edge_score_head(pair_feat).squeeze(-1)  # (B,N,K)
+        sel_score = self.edge_score_head(pair_feat).squeeze(-1)
+
+        logits = sel_score + 0.5 * adj_score
+
+        # 2) 用于边权重的分数
+        edge_weight_logits = self.edge_weight_head(pair_feat).squeeze(-1)  # (B,N,K)
+
+
+        # 你可以按需要选择边权范围：
+        # 方案A：sigmoid -> (0,1)
+        edge_weight_pred = torch.sigmoid(edge_weight_logits)
 
         neg_inf = torch.finfo(logits.dtype).min
         logits = logits.masked_fill(~cand_mask, neg_inf)
 
-        # Gumbel + topk 选 edge_num 条
-        eps = 1e-12
-        U = torch.rand_like(logits).clamp_(min=eps, max=1 - eps)
-        g = -torch.log(-torch.log(U))
-        y = (logits + g) / max(tau_gumbel, 1e-8)
-
-        k_pick = min(self.edge_num, self.sample_num)
-        pick_idx = torch.topk(y, k=k_pick, dim=-1).indices
-        learn_cols = safe_cols.gather(-1, pick_idx)  # (B,N,k_pick)
-
-        learn_adj = torch.zeros(b_samples, num_nodes, num_nodes, device=device, dtype=torch.float32)
-        learn_adj[bat_id, row_id, learn_cols] = 1.0
-
-        # 避免和固定最相似边重复（可选，但跟你原来一致）
-        learn_adj = learn_adj * (1.0 - fix_adj)
-
-        # ----- 5) 合并为最终无权重图 -----
-        coe_Adj = (fix_adj + learn_adj > 0).to(torch.float32)
+        # 为了保险，边权也在非法位置清零
+        edge_weight_pred = edge_weight_pred.masked_fill(~cand_mask, 0.0)
 
 
-        # # Build edge mask E (B,N,N)
-        # edges = Adj.bool()
-        # edge_feat = None
-        #
-        #
-        # # print(datetime.now(), "节点边扩展开始")
-        # # Pair features (dense): (B,N,N,dn) + (B,N,N,dn) (+ edge_feat)
-        # Xu = X.unsqueeze(2).expand(b_samples, num_nodes, num_nodes, X.size(-1))  # u repeated along v
-        # Xv = X.unsqueeze(1).expand(b_samples, num_nodes, num_nodes, X.size(-1))  # v repeated along u
-        #
-        # pair = torch.cat([Xu, Xv], dim=-1)
-        # # print(datetime.now(), "节点边扩展完成")
-        #
-        # # print(datetime.now(), "全连接学习边开始")
-        # # Edge logits z_{u,v}  (论文 Eq.4) :contentReference[oaicite:6]{index=6}
-        # logits = self.mlp(pair).squeeze(-1)  # (B,N,N)
-        # # print(datetime.now(), "全连接学习边完成")
-        #
-        # # Mask non-neighbors to -inf so they won't be selected
-        # neg_inf = torch.finfo(logits.dtype).min
-        # logits = logits.masked_fill(~edges, neg_inf)
-        #
-        # # print(datetime.now(), "Gumbel开始")
-        # # Gumbel trick
-        # g = sample_gumbel(logits.shape, device=device)
-        # y = (logits + g) / max(tau, 1e-8)
-        # # print(datetime.now(), "Gumbel完成")
-        #
-        # if hard:
-        #     # Hard top-k per node (u): sample without replacement by topk on (logits+gumbel)
-        #     # 与论文“每个节点最多选 k 条边”一致 :contentReference[oaicite:7]{index=7}
-        #     idx = y.topk(k=min(self.edge_num, num_nodes), dim=-1).indices  # (B,N,k)
-        #     mask = torch.zeros((b_samples, num_nodes, num_nodes), device=device, dtype=torch.float32)
-        #     mask.scatter_(dim=-1, index=idx, value=1.0)
-        #     # 如果某些节点度数 < k，topk 会带进 -inf 的位置；乘 E 清掉即可
-        #     mask = mask * edges.float()
-        # else:
-        #     # Soft weights: Gumbel-Softmax over neighbors (论文 Eq.6) :contentReference[oaicite:8]{index=8}
-        #     w = fun.softmax(y, dim=-1)  # sums to 1 over all v (non-edges≈0)
-        #     # 让“期望保留边数≈k”：用 k 倍缩放再截断到 1（工程上的常用近似）
-        #     mask = (w * float(self.edge_num)).clamp(max=1.0) * edges.float()
 
-        # mask[bat_id, sensor_id, topk] = 0
-        #
-        # coe_Adj = mask + new_coe_Adj
-        # print(datetime.now(), "图学习完成")
-        return coe_Adj
+        # --------------------------------------------------
+        # 5) Gumbel 采样 / top-k 选最终边
+        # --------------------------------------------------
+        g = sample_gumbel(logits.shape, device=device)
+        y = (logits + g) / max(tau, 1e-8)
+
+        k_pick = min(self.edge_num, Kcand)
+
+        if k_pick == 0:
+            edge_index_big = torch.empty(2, 0, dtype=torch.long, device=device)
+            edge_weight_big = torch.empty(0, dtype=X.dtype, device=device)
+            return edge_index_big, edge_weight_big
+
+        if hard:
+            # 只根据“选边分数”选边
+            pick = y.topk(k=k_pick, dim=-1).indices  # (B,N,k_pick)
+            final_cols = cand_cols.gather(-1, pick)  # (B,N,k_pick)
+
+            # 选中的边，其权重由 weight head 给出
+            final_weights = edge_weight_pred.gather(-1, pick)  # (B,N,k_pick)
+        else:
+            # soft 情况下仍然先取 top-k 边
+            pick = y.topk(k=k_pick, dim=-1).indices
+            final_cols = cand_cols.gather(-1, pick)
+
+            # 边权重仍由 MLP 输出
+            final_weights = edge_weight_pred.gather(-1, pick)
+
+            # 如果你希望 soft 模式下保留“被选中的概率”影响，
+            # 可以把选择概率乘到边权上：
+            #
+            # select_prob = F.softmax(y, dim=-1)
+            # select_prob = (select_prob * float(self.edge_num)).clamp(max=1.0)
+            # final_select_prob = select_prob.gather(-1, pick)
+            # final_weights = final_weights * final_select_prob
+
+            # --------------------------------------------------
+            # 6) 转成 batched edge_index
+            # --------------------------------------------------
+        rows = torch.arange(N, device=device)[None, :, None].expand(B, N, k_pick)
+
+        valid = final_cols >= 0
+        if not self_loop:
+            valid = valid & (final_cols != rows)
+
+        b_idx, src, kk = valid.nonzero(as_tuple=True)
+        dst = final_cols[b_idx, src, kk]
+        ew = final_weights[b_idx, src, kk]
+
+        offset2 = b_idx * N
+        src_big = src + offset2
+        dst_big = dst + offset2
+
+        edge_index_big = torch.stack([src_big, dst_big], dim=0).long()
+        edge_weight_big = ew.float()
+
+        # --------------------------------------------------
+        # 7) 统一补 self-loop
+        # --------------------------------------------------
+        if self_loop:
+            loop_nodes = torch.arange(B * N, device=device)
+            loop_edge_index = torch.stack([loop_nodes, loop_nodes], dim=0)  # (2, B*N)
+
+            # 自环权重
+            loop_edge_weight = torch.ones(B * N, device=device, dtype=edge_weight_big.dtype)
+
+            # 拼接到原图
+            edge_index_big = torch.cat([edge_index_big, loop_edge_index], dim=1)
+            edge_weight_big = torch.cat([edge_weight_big, loop_edge_weight], dim=0)
+
+        return edge_index_big, edge_weight_big, loss_struct
+
 
 
 
 
 class Feature_extractor_1DCNN_Tiny(nn.Module):
-    def __init__(self, input_channels, num_hidden, out_dim, kernel_size=3, stride=1, dropout=0.35):
+    def __init__(self, input_channels, num_hidden, out_dim, kernel_size=3, stride=1, dropout=0.2):
         super(Feature_extractor_1DCNN_Tiny, self).__init__()
 
         self.conv_block1 = nn.Sequential(
@@ -243,23 +420,36 @@ class Feature_extractor_1DCNN_Tiny(nn.Module):
                       stride=stride, bias=False, padding=(kernel_size // 2)),
             nn.BatchNorm1d(num_hidden),
             nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+            nn.MaxPool1d(kernel_size=2, stride=1, padding=1),
             nn.Dropout(dropout)
         )
 
         self.conv_block2 = nn.Sequential(
-            nn.Conv1d(num_hidden, num_hidden * 2, kernel_size=kernel_size, stride=1, bias=False, padding=2),
+            nn.Conv1d(num_hidden, num_hidden * 2, kernel_size=kernel_size, stride=1, bias=False, padding=1),
             nn.BatchNorm1d(num_hidden * 2),
             nn.ReLU(),
             # nn.MaxPool1d(kernel_size=2, stride=2, padding=1)
         )
 
         self.conv_block3 = nn.Sequential(
-            nn.Conv1d(num_hidden * 2, out_dim, kernel_size=kernel_size, stride=1, bias=False, padding=3),
+            nn.Conv1d(num_hidden * 2, out_dim, kernel_size=kernel_size, stride=1, bias=False, padding=1),
             nn.BatchNorm1d(out_dim),
             nn.ReLU(),
             # nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
         )
+
+        self.conv_block4 = nn.Sequential(
+            nn.Conv1d(num_hidden, out_dim, kernel_size=kernel_size, stride=1, bias=False, padding=1),
+            nn.BatchNorm1d(out_dim),
+            nn.ReLU(),
+            # nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+        )
+
+        # 如果通道不一致，用1x1卷积对齐
+        if input_channels != out_dim:
+            self.shortcut = nn.Conv1d(input_channels, out_dim, kernel_size=1, bias=False)
+        else:
+            self.shortcut = nn.Identity()
 
         self.positional_encoding = PositionalEncoding(num_hidden, 0.1)
 
@@ -268,9 +458,9 @@ class Feature_extractor_1DCNN_Tiny(nn.Module):
         ### input dim is (bs, tlen, feature_dim)
 
 
-        x_in = self.conv_block1(x_in)
-        x_in = self.conv_block2(x_in)
-        x = self.conv_block3(x_in)
+        x = self.conv_block1(x_in)
+        x = self.conv_block2(x)
+        x = self.conv_block3(x)
 
         return x
 
@@ -302,7 +492,7 @@ class PositionalEncoding(nn.Module):
         # return x
 
 
-def Dot_Graph_Construction(node_features):
+def Dot_Graph_Construction(node_features, device):
     ## node features size is (bs, N, dimension)
     ## output size is (bs, N, N)
     bs, N, dimen = node_features.size()
@@ -311,44 +501,62 @@ def Dot_Graph_Construction(node_features):
 
     Adj = torch.bmm(node_features, node_features_1)
 
-    eyes_like = torch.eye(N).repeat(bs, 1, 1).cuda()
+    eyes_like = torch.eye(N, device=device).repeat(bs, 1, 1)
 
     eyes_like_inf = eyes_like * 1e8
 
     Adj = fun.leaky_relu(Adj - eyes_like_inf)
 
-    Adj = fun.softmax(Adj, dim=-1)
+    # Adj = fun.softmax(Adj, dim=-1)
+
+    topk_val, topk_idx = torch.topk(Adj, k=10, dim=-1)  # (bs, N, K)
+
+    mask = torch.zeros_like(Adj)
+    mask.scatter_(-1, topk_idx, 1.0)
+
+    Adj = Adj * mask
+
+    # 可选：重新归一化（很重要！）
+    Adj = Adj / (Adj.sum(dim=-1, keepdim=True) + 1e-8)
 
     Adj = Adj + eyes_like
 
     return Adj
 
 
-
 class Dot_Graph_Construction_weights(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, hidden_dim=None, normalize=True):
         super().__init__()
-        self.mapping = nn.Linear(input_dim, input_dim)
+        hidden_dim = input_dim if hidden_dim is None else hidden_dim
+
+        self.mapping = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+
+        )
+        self.normalize = normalize
 
     def forward(self, node_features):
-        node_features = self.mapping(node_features)
-        # node_features = F.leaky_relu(node_features)
-        bs, N, dimen = node_features.size()
+        device = node_features.device
+        B, N, D = node_features.size()
 
-        node_features_1 = torch.transpose(node_features, 1, 2)
+        z = self.mapping(node_features) + node_features
 
-        Adj = torch.bmm(node_features, node_features_1)
+        z = z / (D ** 0.5)
 
-        eyes_like = torch.eye(N).repeat(bs, 1, 1).cuda()
-        eyes_like_inf = eyes_like * 1e8
-        Adj = fun.leaky_relu(Adj - eyes_like_inf)
+        Adj = torch.bmm(z, z.transpose(1, 2))
+
+        eye = torch.eye(N, device=z.device, dtype=torch.bool)[None]
+        Adj = Adj.masked_fill(eye, -1e4)
+
+        # temperature + softmax
+        Adj = Adj / 0.5
         Adj = fun.softmax(Adj, dim=-1)
-        # print(Adj[0])
-        Adj = Adj + eyes_like
-        # print(Adj[0])
-        # if prior:
 
         return Adj
+
+
 
 def Graph_regularization_loss(X, Adj, gamma):
     ### X size is (bs, N, dimension)

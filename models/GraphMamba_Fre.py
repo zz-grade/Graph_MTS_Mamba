@@ -1,5 +1,3 @@
-import random
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as fun
@@ -66,72 +64,6 @@ class GraphMambaGMN(nn.Module):
 
         self.convo_time_length = configs.convo_time_length
         self.pool_nn = DiffPoolForBNLD_NoEmbed(64, configs.num_anchors)
-
-    def run_global_mamba_time_split(self, h_in, T_len, num):
-        # h_in: (B_eff, N, D) where B_eff = B*T
-        B_eff, N, D = h_in.shape
-        assert B_eff % T_len == 0, f"B_eff={B_eff} not divisible by T_len={T_len}"
-        B = B_eff // T_len
-
-        # reshape to (B, T, N, D)
-        h_btnd = h_in.view(B, T_len, N, D)
-
-        outs = []
-        # 逐时间片跑 global mamba：每次输入 (B, N, D)
-        for t in range(T_len):
-            ht = h_btnd[:, t]  # (B, N, D)
-            for layer in num:
-                ht = layer(ht)
-            outs.append(ht)
-
-        # stack back -> (B, T, N, D) -> (B_eff, N, D)
-        h_out = torch.stack(outs, dim=1).reshape(B_eff, N, D)
-        return h_out
-
-    def _encode_subgraph_tokens_single(self, x_single, tokens_per_node):
-        num_nodes, in_dim = x_single.size()
-        device = x_single.device
-        l_token = len(tokens_per_node[0])
-        # node_token_feats = torch.zeros(num_nodes, l_token, self.d_model, device=device)
-        T = num_nodes * l_token
-
-        flat_node_ids = []
-        flat_token_ids = []
-
-        for v in range(num_nodes):
-            tokens_v = tokens_per_node[v]
-            for t, node_ids in enumerate(tokens_v):
-                tok_id = v * l_token + t
-                flat_node_ids.extend(node_ids)
-                flat_token_ids.extend([tok_id] * len(node_ids))
-
-        idx = torch.tensor(flat_node_ids, dtype=torch.long, device=device)  # (M,)
-        tok = torch.tensor(flat_token_ids, dtype=torch.long, device=device)  # (M,)
-
-        sub_x = x_single[idx].float()   # (M, in_dim)
-
-        sum_feat = torch.zeros(T, in_dim, device=device, dtype=torch.float32)
-        sum_feat.index_add_(0, tok, sub_x)  # 按 tok 累加
-
-        count = torch.zeros(T, 1, device=device, dtype=torch.float32)
-        count.index_add_(0, tok, torch.ones((tok.numel(), 1), device=device))
-
-        pooled = sum_feat / count.clamp(min=1)  # (T, in_dim)
-
-        encoded = self.subgraph_encoder(pooled)  # (T, d_model) 一次前向
-        node_token_feats = encoded.view(num_nodes, l_token, self.d_model)  # (N, L, D)
-
-                #
-                # idx = torch.tensor(node_ids, dtype=torch.long, device=device)
-                # sub_x = x_single[idx] # (k, in_dim)
-                # print(datetime.now(), "第{}个节点编码的第{}个token平均池化开始, sub_x = {}".format(v, t, t))
-                # pooled = sub_x.mean(dim=0)  # (in_dim)
-                # print(datetime.now(), "第{}个节点的第{}个token平均池化完成, sub_x = {}".format(v, t, t))
-                # print(datetime.now(), "第{}个节点的第{}个token全连接嵌入完成, sub_x = {}".format(v, t, t))
-                # node_token_feats[v, t] = self.subgraph_encoder(pooled)
-                # print(datetime.now(), "第{}个节点的第{}个token全连接嵌入完成, sub_x = {}".format(v, t, t))
-        return node_token_feats
-
 
 
 
@@ -219,8 +151,8 @@ class GraphMambaGMN(nn.Module):
         # print(datetime.now(), "对比学习开始")
         #
         # # print("对比学习之前", torch.cuda.memory_allocated() / 1024 ** 3, "GB")
-        z1 = self.proj(node_repr_global_1)  # (B,N,Dproj)
-        z2 = self.proj(node_repr_global_1)  # (B,N,Dproj)
+        # z1 = self.proj(node_repr_global_1)  # (B,N,Dproj)
+        # z2 = self.proj(node_repr_global_1)  # (B,N,Dproj)
         # loss_cl = node_contrast_topk_edge_weight_multi_view(
         #     z1=node_repr_global_1,  # (B, N, D)
         #     edge_index=edge_index_big,
@@ -234,27 +166,10 @@ class GraphMambaGMN(nn.Module):
 
         # # print(datetime.now(), "对比损失计算开始")
         # # print("计算损失函数之前", torch.cuda.memory_allocated() / 1024 ** 3, "GB")
-        loss_con = node_info_nce_cross_graph_only(z2, z1)
-        # print(datetime.now(), "对比损失计算完成")
+        # loss_con = node_info_nce_cross_graph_only(z2, z1)
+        # # print(datetime.now(), "对比损失计算完成")
         # print(datetime.now(), "对比学习结束")
-        return node_repr_global_1, loss_con
-
-    def _merge_edge_index_list(self, edge_index_list_in, b_samples, num_node, device):
-        # edge_index_list_in: list长度B，每个是 (2, E_b)
-        # 返回: edge_index_big: (2, E_total)，节点索引已加offset
-
-        edge_chunks = []
-        for b in range(b_samples):
-            ei = edge_index_list_in[b]
-            if ei.dim() != 2 or ei.size(0) != 2:
-                raise ValueError(f"edge_index_list_in[{b}] must be [2,E], got {ei.shape}")
-            ei = ei.to(device).long()
-
-            offset = b * num_node
-            edge_chunks.append(ei + offset)
-
-        edge_index_big = torch.cat(edge_chunks, dim=1)  # (2, E_total)
-        return edge_index_big
+        return node_repr_global_1, loss_cl
 
 
     def Graph_del(self, x, edge_index_big, edge_weight_big, b_samples, num_node, device):
@@ -372,103 +287,16 @@ class MPNN_nk(MessagePassing):
             for _ in range(mpnn_layer)
         ])
 
-        # 残差投影（防止维度不一致）
-        if in_fea != out_fea:
-            self.res_proj = nn.Linear(in_fea, out_fea)
-        else:
-            self.res_proj = nn.Identity()
-
     def forward(self, x, edge_index, edge_weight):
         for msg_mlp, upd_mlp in zip(self.msg_mlps, self.upd_mlps):
-            identity = self.res_proj(x)
             m = self.propagate(edge_index, x=x, edge_weight=edge_weight, msg_mlp=msg_mlp)
             out = upd_mlp(torch.cat([x, m], dim=-1))
-            x = out + identity
-        return x
+            x = out
+        return out
 
     def message(self, x_j, edge_weight, msg_mlp):
         return msg_mlp(x_j) * edge_weight.unsqueeze(-1)
 
-def node_info_nce_cross_graph_only(z1, z2, tau=0.2, chunk_size=128):
-    """
-    z1, z2: (B, N, D)
-    正样本：(b,i) <-> (b,i)
-    负样本：只来自 b' != b 的节点
-    """
-    b_samples, N, D = z1.shape
-
-
-    idx = torch.randperm(N, device=z1.device)[:32]  # (K,)
-    z1 = z1[:, idx, :]  # (B, K, D)
-    z2 = z2[:, idx, :]
-
-    BK = b_samples * 32
-
-    # 1. 归一化
-    z1 = fun.normalize(z1, dim=-1)
-    z2 = fun.normalize(z2, dim=-1)
-
-    # 2. 展平为 (BN, D)
-    x1 = z1.reshape(b_samples * 32, D)
-    x2 = z2.reshape(b_samples * 32, D)
-
-    # 3. 相似度矩阵
-    # logits = (x1 @ x2.T) / tau   # (BN, BN)
-
-    # 4. 构造 graph_id
-    # 第 k = b*N + i 个节点来自第 b 个图
-    graph_id = torch.arange(b_samples, device=z1.device).repeat_interleave(32)
-
-    # 5. 屏蔽“同图但非自身”的位置
-    # same_graph = graph_id[:, None] == graph_id[None, :]  # (BN,BN)
-    # diag = torch.eye(b_samples * N, device=z1.device, dtype=torch.bool)
-    # mask = same_graph & (~diag)
-
-    # logits = logits.masked_fill(mask, float('-inf'))
-
-    labels = torch.arange(b_samples * N, device=z1.device)
-    def ce_rows_chunked(x_rows, x_cols, row_ids, col_ids):
-        """
-        x_rows: (BN, D) 作为 rows
-        x_cols: (BN, D) 作为 cols
-        row_ids/col_ids: (BN,) graph id
-        返回：mean CE（等价于 F.cross_entropy 全量计算）
-        """
-        total_sum = x_rows.new_zeros(())
-        col_index = torch.arange(BK, device=z1.device)  # (BK,)
-
-        # 预先转置可减少开销
-        x_cols_T = x_cols.T.contiguous()
-
-        for i0 in range(0, BK, chunk_size):
-            i1 = min(i0 + chunk_size, BK)
-            row_index = torch.arange(i0, i1, device=z1.device)  # (m,)
-
-            logits = (x_rows[i0:i1] @ x_cols_T) / tau  # (m, BK)
-
-            same_graph = (row_ids[i0:i1].unsqueeze(1) == col_ids.unsqueeze(0))  # (m,BK)
-            diag = (row_index.unsqueeze(1) == col_index.unsqueeze(0))  # (m,BK)
-            mask = same_graph & (~diag)
-            logits = logits.masked_fill(mask, float("-inf"))
-
-            target = labels[i0:i1]
-            # 用 sum，最后除以 BK
-            total_sum = total_sum + torch.nn.functional.cross_entropy(
-                logits, target, reduction="sum"
-            )
-
-            # 及时释放大张量
-            del logits, same_graph, diag, mask
-
-        return total_sum / BK
-    # 6. InfoNCE（双向）
-
-    # loss_12 = fun.cross_entropy(logits, labels)
-    # loss_21 = fun.cross_entropy(logits.T, labels)
-    # loss_12 = ce_rows_chunked(x1, x2, graph_id, graph_id)
-    loss_21 = ce_rows_chunked(x2, x1, graph_id, graph_id)
-
-    return loss_21
 
 
 class DiffPoolForBNLD_NoEmbed(nn.Module):
@@ -535,56 +363,3 @@ class DiffPoolLayerNoEmbed(nn.Module):
             aux_loss = self.link_pred_weight * link_loss + self.entropy_weight * ent
 
         return X_pool, A_pool, S, aux_loss
-
-
-def feature_dropout(x, drop_prob=0.2, training=True):
-    """
-    x: (B, N, D)
-    返回: 与 x 同 shape
-    """
-    if (not training) or drop_prob <= 0.0:
-        return x
-
-    # 逐元素 dropout；也可以改成按通道 dropout
-    mask = (torch.rand_like(x) > drop_prob).float()
-    x_drop = x * mask
-
-    # 可选：保持期望不变
-    x_drop = x_drop / (1.0 - drop_prob + 1e-12)
-    return x_drop
-
-
-def feature_noise(x, noise_std=0.01, training=True):
-    """
-    x: (B, N, D)
-    返回: 与 x 同 shape
-    """
-    if (not training) or noise_std <= 0.0:
-        return x
-
-    noise = torch.randn_like(x) * noise_std
-    return x + noise
-
-
-def build_feature_perturbed_view(
-    h,
-    drop_prob=0.2,
-    noise_std=0.01,
-    training=True,
-    use_dropout=True,
-    use_noise=True,
-):
-    """
-    基于节点表示 h 构建第二个特征扰动视图
-
-    h: (B, N, D)
-    """
-    z = h
-
-    if use_dropout:
-        z = feature_dropout(z, drop_prob=drop_prob, training=training)
-
-    if use_noise:
-        z = feature_noise(z, noise_std=noise_std, training=training)
-
-    return z
