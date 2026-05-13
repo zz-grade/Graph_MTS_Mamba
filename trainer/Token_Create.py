@@ -49,23 +49,12 @@ def _build_adj_list_from_matrix(adj):
 
 def _build_edge_index_from_matrix(adj):
     adj_cpu = adj.detach()
-    num_node = adj_cpu.size(0)
-    # edges = (adj_cpu != 0).nonzero(as_tuple=False)  # (E, 2)
+    edges = (adj_cpu != 0).nonzero(as_tuple=False)  # (E, 2)
 
-    # 取每行 topk 的列索引
-    vals, cols = torch.topk(adj_cpu, k=min(10, num_node - 1), dim=1)  # (N,k)
-
-    rows = torch.arange(num_node, device=adj_cpu.device).unsqueeze(1).expand_as(cols)  # (N,k)
-    edge_index = torch.stack([rows.reshape(-1), cols.reshape(-1)], dim=0)  # (2, N*k)
-
-    # 可选：如果你不想要 -inf / nan 的边，过滤掉无效 vals
-    valid = torch.isfinite(vals).reshape(-1)
-    edge_index = edge_index[:, valid]
-
-    # if edges.numel() == 0:
-    #     edge_index = torch.empty(2, 0, dtype=torch.long)
-    # else:
-    #     edge_index = edges.t().contiguous().long()  # (2, E)
+    if edges.numel() == 0:
+        edge_index = torch.empty(2, 0, dtype=torch.long)
+    else:
+        edge_index = edges.t().contiguous().long()  # (2, E)
 
     return edge_index
 

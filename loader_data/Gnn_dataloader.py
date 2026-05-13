@@ -2,7 +2,7 @@ import os
 
 import numpy as np
 from torch.utils.data import Dataset
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 import torch
 from .augmentations import *
 
@@ -45,9 +45,9 @@ class Load_Training_Data(Dataset):
         self.configs = configs
         x_train = dataset['samples']
         y_train = dataset['labels']
-        wavelet_aug = False
 
-        if wavelet_aug:
+
+        if configs.wavelet_aug:
             x_train_aug1 = x_train.numpy()
             x_train_aug2 = x_train.numpy()
             x_train_aug1 = wavelet_transform(x_train_aug1, True)
@@ -124,14 +124,13 @@ def data_generator2(data_path, configs, args):
 
 
 def data_generator(data_path, configs, args):
-
     train_dataset = torch.load(os.path.join(data_path, 'train.pt'))
     test_dataset = torch.load(os.path.join(data_path, 'test.pt'))
 
     train_dataset = Load_Training_Data(train_dataset, configs, args)
     test_dataset = Load_Training_Data(test_dataset, configs, args)
 
-    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=configs.drop_last, num_workers=0, pin_memory=True,)
-    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
 
     return train_loader, test_loader
