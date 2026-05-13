@@ -38,21 +38,19 @@ class transformer_construction(nn.Module):
 
 class NeuralSparseSparsifier(nn.Module):
 
-    def __init__(self, configs, edge_num=None, similar_edge=None, node_dim=None, edge_dim=0, hidden=128):
+    def __init__(self, configs, edge_num, similar_edge, node_dim, edge_dim=0, hidden=128):
         super().__init__()
-        node_dim = node_dim or getattr(configs, "hidden_channels")
-        in_dim = 2 * node_dim + edge_dim
+        in_dim = 2 * configs.hidden_channels + edge_dim
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.ReLU(),
             nn.Linear(hidden, 1),
         )
-        self.edge_num = edge_num if edge_num is not None else getattr(configs, "edge_num", 4)
-        self.similar_edge = similar_edge if similar_edge is not None else getattr(configs, "similar_edge", 4)
-        self.max_hop = getattr(configs, "max_hop", 2)
-        self.ran_num = getattr(configs, "ran_num", 2)
-        default_sample_num = max(self.edge_num + self.similar_edge, self.ran_num * self.max_hop, 1)
-        self.sample_num = getattr(configs, "sample_num", default_sample_num)
+        self.edge_num = configs.edge_num
+        self.similar_edge = configs.similar_edge
+        self.max_hop = configs.max_hop
+        self.ran_num = configs.ran_num
+        self.sample_num = configs.sample_num
 
 
     def forward(self, X, Adj, tau_gumbel=1.0, tau_walk=1.0, hard=True, uniform_walk=True):
@@ -73,10 +71,10 @@ class NeuralSparseSparsifier(nn.Module):
         device = X.device
 
         # ----------  固定最相似边 ----------
-        k_fix = min(self.similar_edge, num_nodes)
+        topk = Adj.topk(self.similar_edge, dim=-1).indices
         bat_id = torch.arange(b_samples, device=device)[:, None, None]  # (B,1,1)
         row_id = torch.arange(num_nodes, device=device)[None, :, None]  # (1,N,1)
-        fix_cols = Adj.topk(k=k_fix, dim=-1).indices  # (B,N,k_fix)
+        fix_cols = Adj.topk(k=self.similar_edge, dim=-1).indices  # (B,N,k_fix)
         fix_adj = torch.zeros(b_samples, num_nodes, num_nodes, device=device, dtype=torch.float32)
         fix_adj[bat_id, row_id, fix_cols] = 1.0
 
@@ -171,7 +169,7 @@ class NeuralSparseSparsifier(nn.Module):
         g = -torch.log(-torch.log(U))
         y = (logits + g) / max(tau_gumbel, 1e-8)
 
-        k_pick = min(self.edge_num, self.sample_num, num_nodes)
+        k_pick = min(self.edge_num, self.sample_num)
         pick_idx = torch.topk(y, k=k_pick, dim=-1).indices
         learn_cols = safe_cols.gather(-1, pick_idx)  # (B,N,k_pick)
 
@@ -285,7 +283,7 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
         # Compute the positional encodings once in log space.
-        pe = torch.zeros(max_len, d_model)
+        pe = torch.zeros(max_len, d_model).cuda()
         position = torch.arange(0, max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) *
                              -(math.log(100.0) / d_model))
@@ -313,7 +311,7 @@ def Dot_Graph_Construction(node_features):
 
     Adj = torch.bmm(node_features, node_features_1)
 
-    eyes_like = torch.eye(N, device=node_features.device, dtype=node_features.dtype).repeat(bs, 1, 1)
+    eyes_like = torch.eye(N).repeat(bs, 1, 1).cuda()
 
     eyes_like_inf = eyes_like * 1e8
 
@@ -341,7 +339,7 @@ class Dot_Graph_Construction_weights(nn.Module):
 
         Adj = torch.bmm(node_features, node_features_1)
 
-        eyes_like = torch.eye(N, device=node_features.device, dtype=node_features.dtype).repeat(bs, 1, 1)
+        eyes_like = torch.eye(N).repeat(bs, 1, 1).cuda()
         eyes_like_inf = eyes_like * 1e8
         Adj = fun.leaky_relu(Adj - eyes_like_inf)
         Adj = fun.softmax(Adj, dim=-1)
@@ -374,9 +372,8 @@ def Graph_regularization_loss(X, Adj, gamma):
     return Loss_GL
 
 
-def Mask_Matrix(num_node, time_length, decay_rate, device=None):
-    target_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    Adj = torch.ones(num_node * time_length, num_node * time_length, device=target_device)
+def Mask_Matrix(num_node, time_length, decay_rate):
+    Adj = torch.ones(num_node * time_length, num_node * time_length).cuda()
     for i in range(time_length):
         v = 0
         for r_i in range(i,time_length):
