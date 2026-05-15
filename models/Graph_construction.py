@@ -52,7 +52,6 @@ class NeuralSparseSparsifier(nn.Module):
         self.similar_edge = configs.similar_edge
         self.max_hop = configs.max_hop
         self.ran_num = configs.ran_num
-        self.sample_num = getattr(configs, "sample_num", 1)
         # 让 alpha 也变成可学习（可选）
         self.log_alpha = nn.Parameter(torch.log(torch.tensor(0.1, dtype=torch.float32)))
         # 控制自学习边权影响强度

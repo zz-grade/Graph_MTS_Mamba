@@ -77,7 +77,8 @@ def main(configs, args):
     os.makedirs(logs_save_dir, exist_ok = True)
 
     SEED = args.seed
-    fix_randomness(SEED)
+    torch.manual_seed(SEED)
+    torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
     experiment_log_dir = os.path.join(logs_save_dir, experiment_description, run_description,
