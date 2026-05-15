@@ -14,13 +14,30 @@ def set_requires_grad(model, dict_, requires_grad=True):
             param[1].requires_grad = requires_grad
 
 
-def fix_randomness(SEED):
+def fix_randomness(SEED, deterministic=True, warn_only=True):
+    SEED = int(SEED)
+    os.environ["PYTHONHASHSEED"] = str(SEED)
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
     random.seed(SEED)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(SEED)
-    torch.backends.cudnn.deterministic = True
+        torch.cuda.manual_seed_all(SEED)
+
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch, "use_deterministic_algorithms"):
+        try:
+            torch.use_deterministic_algorithms(deterministic, warn_only=warn_only)
+        except TypeError:
+            torch.use_deterministic_algorithms(deterministic)
 
 
 def epoch_time(start_time, end_time):

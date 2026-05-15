@@ -22,7 +22,8 @@ def Trainer(model, model_optimizer, train_dl, val_dl, test_dl, device, logger, c
     for epoch in range(1, configs.num_epoch + 1):
         # train_sampler.set_epoch(epoch)
         # test_sampler.set_epoch(epoch)
-        loss = model_train(model, model_optimizer, criterion, train_dl, device)
+        loss = model_train(model, model_optimizer, criterion, train_dl, device,
+                           use_amp=getattr(args, "amp", False))
 
         if epoch % configs.show_interval == 0:
             accu_val = Cross_validation(model, val_dl, device)
@@ -53,8 +54,8 @@ def _split_model_output(output):
     return output, None
 
 
-def model_train(model, model_optimizer, criterion, train_loader, device):
-    use_amp = device.type == "cuda"
+def model_train(model, model_optimizer, criterion, train_loader, device, use_amp=False):
+    use_amp = bool(use_amp and device.type == "cuda")
     scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     model.train()
     # num = int(len(train_loader.dataset) * 0.8)

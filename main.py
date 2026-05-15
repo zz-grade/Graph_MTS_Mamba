@@ -1,11 +1,14 @@
 import argparse
 import importlib
+import os
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 from datetime import datetime
 import torch
 from models.primary_model import Base_model
 from trainer.train_Graph_MTS import Trainer
 from utils import _logger, fix_randomness
-import os
 from loader_data.Gnn_dataloader import data_generator, data_generator2, synthetic_data_generator
 
 
@@ -34,6 +37,15 @@ parser.add_argument('--num_runs', default=1, type=int,
                     help='Number of repeated runs with consecutive seeds')
 parser.add_argument('--smoke_test', action='store_true',
                     help='Run a one-epoch synthetic-data sanity check without dataset files')
+parser.add_argument('--no_deterministic', dest='deterministic', action='store_false',
+                    help='Disable deterministic PyTorch settings')
+parser.set_defaults(deterministic=True)
+parser.add_argument('--strict_determinism', action='store_true',
+                    help='Raise an error when PyTorch detects a nondeterministic operation')
+parser.add_argument('--amp', action='store_true',
+                    help='Enable CUDA mixed precision. Disabled by default for reproducible runs')
+parser.add_argument('--same_seed_runs', action='store_true',
+                    help='Use the same seed for every run when --num_runs is greater than 1')
 
 
 def apply_config_defaults(configs):
@@ -77,9 +89,8 @@ def main(configs, args):
     os.makedirs(logs_save_dir, exist_ok = True)
 
     SEED = args.seed
-    torch.manual_seed(SEED)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    fix_randomness(SEED, deterministic=args.deterministic,
+                   warn_only=not args.strict_determinism)
 
     experiment_log_dir = os.path.join(logs_save_dir, experiment_description, run_description,
                                       training_mode + f"_seed_{SEED}")
@@ -92,6 +103,9 @@ def main(configs, args):
     logger.debug(f'Method:  {method}')
     logger.debug(f'Mode:    {training_mode}')
     logger.debug(f'Device:  {device}')
+    logger.debug(f'Seed:    {SEED}')
+    logger.debug(f'Deterministic: {args.deterministic}')
+    logger.debug(f'AMP:     {args.amp}')
     logger.debug("=" * 45)
 
 
@@ -131,13 +145,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     data_type = args.selected_dataset
-    configs = load_configs(data_type)
-    apply_config_defaults(configs)
-    if args.smoke_test:
-        configure_smoke_test(configs)
-
     base_seed = args.seed
     for run_idx in range(args.num_runs):
-        args.seed = base_seed + run_idx
+        args.seed = base_seed if args.same_seed_runs else base_seed + run_idx
+        configs = load_configs(data_type)
+        apply_config_defaults(configs)
+        if args.smoke_test:
+            configure_smoke_test(configs)
         main(configs, args)
 

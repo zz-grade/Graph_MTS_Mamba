@@ -9,7 +9,10 @@ import pandas as pd
 
 def str2value(label_train, label_test):
     class_label = set(np.concatenate([label_train, label_test], 0))
-    class_label = list(class_label)
+    try:
+        class_label = sorted(class_label)
+    except TypeError:
+        class_label = sorted(class_label, key=lambda value: str(value))
     num_class = len(class_label)
 
     dict_class = {}

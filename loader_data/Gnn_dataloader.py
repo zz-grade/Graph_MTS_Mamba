@@ -23,6 +23,18 @@ def _to_numpy(value):
     return value.detach().cpu().numpy()
 
 
+def _seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2 ** 32
+    np.random.seed(worker_seed)
+
+
+def _make_generator(args, offset=0):
+    seed = int(getattr(args, "seed", 0)) + offset
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
+
 class Load_Dataset(Dataset):
     def __init__(self, dataset, configs, args):
         super(Load_Dataset, self).__init__()
@@ -125,9 +137,15 @@ def data_generator2(data_path, configs, args):
     val_dataset = Load_Training_Data(val_dataset, configs, args, False)
     test_dataset = Load_Training_Data(test_dataset, configs, args)
 
-    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True,
+                              drop_last=configs.drop_last, num_workers=0,
+                              worker_init_fn=_seed_worker, generator=_make_generator(args, 0))
+    val_loader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=False,
+                            drop_last=False, num_workers=0,
+                            worker_init_fn=_seed_worker, generator=_make_generator(args, 1))
+    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False,
+                             drop_last=False, num_workers=0,
+                             worker_init_fn=_seed_worker, generator=_make_generator(args, 2))
 
     return train_loader, val_loader, test_loader
 
@@ -140,8 +158,12 @@ def data_generator(data_path, configs, args, return_val=False):
     train_dataset = Load_Training_Data(train_dataset, configs, args)
     test_dataset = Load_Training_Data(test_dataset, configs, args)
 
-    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True,
+                              drop_last=configs.drop_last, num_workers=0,
+                              worker_init_fn=_seed_worker, generator=_make_generator(args, 0))
+    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False,
+                             drop_last=False, num_workers=0,
+                             worker_init_fn=_seed_worker, generator=_make_generator(args, 2))
 
     if return_val:
         return train_loader, test_loader, test_loader
@@ -161,8 +183,14 @@ def synthetic_data_generator(configs, args, train_size=8, val_size=4, test_size=
     val_dataset = Load_Training_Data(make_dataset(val_size), configs, args, False)
     test_dataset = Load_Training_Data(make_dataset(test_size), configs, args)
 
-    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=False, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
-    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
+    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True,
+                              drop_last=False, num_workers=0,
+                              worker_init_fn=_seed_worker, generator=_make_generator(args, 0))
+    val_loader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=False,
+                            drop_last=False, num_workers=0,
+                            worker_init_fn=_seed_worker, generator=_make_generator(args, 1))
+    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False,
+                             drop_last=False, num_workers=0,
+                             worker_init_fn=_seed_worker, generator=_make_generator(args, 2))
 
     return train_loader, val_loader, test_loader
