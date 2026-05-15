@@ -96,6 +96,7 @@ class Base_model(nn.Module):
         logits.std()
         if torch.is_tensor(graph_loss):
             loss_cl = loss_cl + graph_loss
+        loss_cl = 0
         return logits, loss_cl
 
 

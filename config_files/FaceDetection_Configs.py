@@ -56,8 +56,8 @@ class Config(object):
         self.dimension_state = 64
         self.dimension_conv = 4
         self.expand = 2
-        self.num_local_layers = 1
-        self.num_global_layers = 3
+        self.num_local_layers = 2
+        self.num_global_layers = 2
 
         self.use_mpnn = 1
 

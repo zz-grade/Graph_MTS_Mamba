@@ -52,10 +52,11 @@ class NeuralSparseSparsifier(nn.Module):
         self.similar_edge = configs.similar_edge
         self.max_hop = configs.max_hop
         self.ran_num = configs.ran_num
+        self.sample_num = configs.sample_num
         # 让 alpha 也变成可学习（可选）
         self.log_alpha = nn.Parameter(torch.log(torch.tensor(0.1, dtype=torch.float32)))
         # 控制自学习边权影响强度
-        self.log_beta = nn.Parameter(torch.log(torch.tensor(0.8, dtype=torch.float32)))
+        self.log_beta = nn.Parameter(torch.log(torch.tensor(0.5, dtype=torch.float32)))
 
         # 根据一条边两端节点特征，学习这条边的 gate
         # 输入维度 = x_src + x_dst + |x_src-x_dst| + x_src*x_dst + dt + prior_w
@@ -176,10 +177,10 @@ class NeuralSparseSparsifier_Mul(nn.Module):
 
         self.edge_num = configs.edge_num
         self.similar_edge = configs.similar_edge
-        self.random_edge = getattr(configs, "random_edge", 0)
+        self.random_edge = configs.random_edge
         self.max_hop = configs.max_hop
         self.ran_num = configs.ran_num
-        self.sample_num = getattr(configs, "sample_num", 1)
+        self.sample_num = configs.sample_num
 
     def forward(self, X, Adj, tau=1.0, hard=False, self_loop=False, edge_eps=0.0):
         """
@@ -472,7 +473,7 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
         # Compute the positional encodings once in log space.
-        pe = torch.zeros(max_len, d_model)
+        pe = torch.zeros(max_len, d_model).cuda()
         position = torch.arange(0, max_len).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2) *
                              -(math.log(100.0) / d_model))
@@ -508,7 +509,7 @@ def Dot_Graph_Construction(node_features, device):
 
     # Adj = fun.softmax(Adj, dim=-1)
 
-    topk_val, topk_idx = torch.topk(Adj, k=min(10, N), dim=-1)  # (bs, N, K)
+    topk_val, topk_idx = torch.topk(Adj, k=10, dim=-1)  # (bs, N, K)
 
     mask = torch.zeros_like(Adj)
     mask.scatter_(-1, topk_idx, 1.0)

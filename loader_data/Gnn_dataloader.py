@@ -44,8 +44,8 @@ class Load_Dataset(Dataset):
 
         if len(x_train.shape) < 3:
             x_train = x_train.unsqueeze(2)
-        if x_train.shape.index(min(x_train)) != 1:
-            x_train = x_train.permute(0, 2, 1)
+        # if x_train.shape.index(min(x_train)) != 1:
+        #     x_train = x_train.permute(0, 2, 1)
         if isinstance(x_train, np.ndarray):
             self.x_data = torch.from_numpy(x_train)
             self.y_data = torch.from_numpy(y_train).long()

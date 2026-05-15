@@ -3,62 +3,17 @@ import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as fun
+from torch_geometric.nn import MessagePassing
+from torch_geometric.nn.dense.linear import Linear
 from torch.utils.checkpoint import checkpoint
 from datetime import datetime
 
 
-try:
-    from mamba_ssm import Mamba
-except ImportError:
-    class Mamba(nn.Module):
-        def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
-            super().__init__()
-            hidden = max(d_model, int(d_model * expand))
-            self.net = nn.Sequential(
-                nn.Linear(d_model, hidden),
-                nn.SiLU(),
-                nn.Linear(hidden, d_model),
-            )
-
-        def forward(self, x):
-            return self.net(x)
-
-
-try:
-    from torch_geometric.nn import MessagePassing
-    from torch_geometric.nn.dense.linear import Linear
-except ImportError:
-    Linear = nn.Linear
-
-    class MessagePassing(nn.Module):
-        def __init__(self, aggr='add', **kwargs):
-            super().__init__()
-            self.aggr = aggr
-
-        def reset_parameters(self):
-            return None
-
-        def propagate(self, edge_index, x, edge_attr=None, edge_weight=None, msg_mlp=None):
-            if edge_index.numel() == 0:
-                out_dim = x.size(-1)
-                if msg_mlp is not None:
-                    out_dim = msg_mlp(x[:1]).size(-1)
-                return x.new_zeros((x.size(0), out_dim))
-
-            src, dst = edge_index
-            x_j = x[src]
-            if msg_mlp is not None:
-                messages = self.message(x_j, edge_weight, msg_mlp)
-            elif edge_attr is not None:
-                messages = self.message(x_j, edge_attr)
-            elif edge_weight is not None:
-                messages = self.message(x_j, edge_weight)
-            else:
-                messages = x_j
-
-            out = x.new_zeros((x.size(0), messages.size(-1)))
-            out.index_add_(0, dst.long(), messages)
-            return out
+from mamba_ssm import Mamba
+from torch_geometric.data.remote_backend_utils import num_nodes
+from torch_geometric.datasets import KarateClub
+from torch_geometric.nn import GCNConv
+from torch_geometric.utils import degree
 
 from models.augmentation import build_topk_neighbor_mask
 
@@ -67,12 +22,11 @@ class GraphMambaGMN(nn.Module):
     def __init__(self, configs, args):
         super().__init__()
         d_model = configs.dimension_token
-        mlp_hidden = getattr(configs, "mlp_hidden", d_model * 4)
         self.subgraph_encoder = nn.Sequential(
-            nn.Linear(configs.hidden_channels, mlp_hidden),
-            nn.RMSNorm(mlp_hidden),
+            nn.Linear(configs.hidden_channels, configs.mlp_hidden),
+            nn.RMSNorm(configs.mlp_hidden),
             nn.ReLU(),
-            nn.Linear(mlp_hidden, d_model),
+            nn.Linear(configs.mlp_hidden, d_model),
         )
         self.local_mamba = nn.ModuleList([
             BidirectionalMamba(configs)
@@ -83,7 +37,7 @@ class GraphMambaGMN(nn.Module):
             for _ in range(configs.num_global_layers)
         ])
         if configs.use_mpnn:
-            self.mpnn = MPNN_nk(configs.hidden_channels, d_model, getattr(configs, "mpnn_layer", 1))
+            self.mpnn = MPNN_nk(configs.hidden_channels, d_model, configs.mpnn_layer)
         else:
             self.mpnn = None
 
@@ -107,11 +61,11 @@ class GraphMambaGMN(nn.Module):
         self.seed = args.seed
         self.configs = configs
         self.d_model = d_model
-        self.use_mpnn = bool(configs.use_mpnn)
+        self.use_mpnn = None
         self.b_sample = configs
 
         self.convo_time_length = configs.convo_time_length
-        self.pool_nn = DiffPoolForBNLD_NoEmbed(d_model, getattr(configs, "num_anchors", 1))
+        self.pool_nn = DiffPoolForBNLD_NoEmbed(64, configs.num_anchors)
 
     def run_global_mamba_time_split(self, h_in, T_len, num):
         # h_in: (B_eff, N, D) where B_eff = B*T
@@ -317,10 +271,7 @@ class GraphMambaGMN(nn.Module):
         x_flat = x.reshape(b_samples * num_node, F)
 
         # 3) 一次跑完 MPNN：输出 (B*N, D)
-        if self.mpnn is None:
-            neigh_flat = self.subgraph_encoder(x_flat)
-        else:
-            neigh_flat = self.mpnn(x_flat, edge_index_big, edge_weight_big)  # (B*N, D)
+        neigh_flat = self.mpnn(x_flat, edge_index_big, edge_weight_big)  # (B*N, D)
 
         # 4) 还原形状给后面用： (B*N, D) -> (B,N,1,D)
         node_token_feats = neigh_flat.view(b_samples, num_node, -1).unsqueeze(2)  # (B,N,1,D)
@@ -447,27 +398,26 @@ def node_info_nce_cross_graph_only(z1, z2, tau=0.2, chunk_size=128):
     b_samples, N, D = z1.shape
 
 
-    k = min(32, N)
-    idx = torch.randperm(N, device=z1.device)[:k]  # (K,)
+    idx = torch.randperm(N, device=z1.device)[:32]  # (K,)
     z1 = z1[:, idx, :]  # (B, K, D)
     z2 = z2[:, idx, :]
 
-    BK = b_samples * k
+    BK = b_samples * 32
 
     # 1. 归一化
     z1 = fun.normalize(z1, dim=-1)
     z2 = fun.normalize(z2, dim=-1)
 
     # 2. 展平为 (BN, D)
-    x1 = z1.reshape(BK, D)
-    x2 = z2.reshape(BK, D)
+    x1 = z1.reshape(b_samples * 32, D)
+    x2 = z2.reshape(b_samples * 32, D)
 
     # 3. 相似度矩阵
     # logits = (x1 @ x2.T) / tau   # (BN, BN)
 
     # 4. 构造 graph_id
     # 第 k = b*N + i 个节点来自第 b 个图
-    graph_id = torch.arange(b_samples, device=z1.device).repeat_interleave(k)
+    graph_id = torch.arange(b_samples, device=z1.device).repeat_interleave(32)
 
     # 5. 屏蔽“同图但非自身”的位置
     # same_graph = graph_id[:, None] == graph_id[None, :]  # (BN,BN)
@@ -476,7 +426,7 @@ def node_info_nce_cross_graph_only(z1, z2, tau=0.2, chunk_size=128):
 
     # logits = logits.masked_fill(mask, float('-inf'))
 
-    labels = torch.arange(BK, device=z1.device)
+    labels = torch.arange(b_samples * N, device=z1.device)
     def ce_rows_chunked(x_rows, x_cols, row_ids, col_ids):
         """
         x_rows: (BN, D) 作为 rows

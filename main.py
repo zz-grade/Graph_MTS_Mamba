@@ -24,7 +24,7 @@ parser.add_argument('--run_description', default='run1', type=str,
 parser.add_argument('--seed', default=0, type=int,
                     help='seed value')
 parser.add_argument('--training_mode', default='train_linear', type=str)
-parser.add_argument('--selected_dataset', default='HAR', type=str)
+parser.add_argument('--selected_dataset', default='FaceDetection', type=str)
 parser.add_argument('--logs_save_dir', default='experiments_logs', type=str,
                     help='saving directory')
 parser.add_argument('--device', default='cuda', type=str,
@@ -133,7 +133,7 @@ def main(configs, args):
 
     print("Using device:", device)
 
-    Trainer(model, model_optimizer, train_dl, val_dl, test_dl, device, logger, configs, args)
+    Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, args)
 
 
 
