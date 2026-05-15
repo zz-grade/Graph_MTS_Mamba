@@ -18,7 +18,8 @@ def fix_randomness(SEED):
     random.seed(SEED)
     np.random.seed(SEED)
     torch.manual_seed(SEED)
-    torch.cuda.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(SEED)
     torch.backends.cudnn.deterministic = True
 
 

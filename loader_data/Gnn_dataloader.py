@@ -7,6 +7,22 @@ import torch
 from .augmentations import *
 
 
+def _to_tensor(value, dtype=None):
+    if isinstance(value, np.ndarray):
+        tensor = torch.from_numpy(value)
+    elif torch.is_tensor(value):
+        tensor = value
+    else:
+        tensor = torch.as_tensor(value)
+    return tensor.to(dtype=dtype) if dtype is not None else tensor
+
+
+def _to_numpy(value):
+    if isinstance(value, np.ndarray):
+        return value
+    return value.detach().cpu().numpy()
+
+
 class Load_Dataset(Dataset):
     def __init__(self, dataset, configs, args):
         super(Load_Dataset, self).__init__()
@@ -48,8 +64,8 @@ class Load_Training_Data(Dataset):
 
 
         if configs.wavelet_aug:
-            x_train_aug1 = x_train.numpy()
-            x_train_aug2 = x_train.numpy()
+            x_train_aug1 = _to_numpy(x_train)
+            x_train_aug2 = _to_numpy(x_train)
             x_train_aug1 = wavelet_transform(x_train_aug1, True)
             x_train_aug2 = wavelet_transform(x_train_aug2, False)
             x_train_aug1 = torch.from_numpy(x_train_aug1)
@@ -58,16 +74,10 @@ class Load_Training_Data(Dataset):
             x_train_aug1 = x_train
             x_train_aug2 = x_train
 
-        if isinstance(x_train, np.ndarray):
-            self.x_data = torch.from_numpy(x_train)
-            self.x_data_aug1 = torch.from_numpy(x_train_aug1)
-            self.x_data_aug2 = torch.from_numpy(x_train_aug2)
-            self.y_data = torch.from_numpy(y_train).long()
-        else:
-            self.x_data = x_train.float()
-            self.x_data_aug1 = x_train_aug1.float()
-            self.x_data_aug2 = x_train_aug2.float()
-            self.y_data = y_train.long()
+        self.x_data = _to_tensor(x_train, torch.float32)
+        self.x_data_aug1 = _to_tensor(x_train_aug1, torch.float32)
+        self.x_data_aug2 = _to_tensor(x_train_aug2, torch.float32)
+        self.y_data = _to_tensor(y_train, torch.long)
 
         if self.x_data.shape[0] != self.y_data.shape[0]:
             print("x_data len:", self.x_data.shape[0])
@@ -116,14 +126,14 @@ def data_generator2(data_path, configs, args):
     test_dataset = Load_Training_Data(test_dataset, configs, args)
 
     train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
 
     return train_loader, val_loader, test_loader
 
 
 
-def data_generator(data_path, configs, args):
+def data_generator(data_path, configs, args, return_val=False):
     train_dataset = torch.load(os.path.join(data_path, 'train.pt'))
     test_dataset = torch.load(os.path.join(data_path, 'test.pt'))
 
@@ -133,4 +143,26 @@ def data_generator(data_path, configs, args):
     train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=configs.drop_last, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
 
+    if return_val:
+        return train_loader, test_loader, test_loader
     return train_loader, test_loader
+
+
+def synthetic_data_generator(configs, args, train_size=8, val_size=4, test_size=4):
+    feature_len = configs.time_denpen_len * configs.window_size
+
+    def make_dataset(size):
+        return {
+            "samples": torch.randn(size, configs.num_nodes, feature_len),
+            "labels": torch.randint(0, configs.num_classes, (size,)),
+        }
+
+    train_dataset = Load_Training_Data(make_dataset(train_size), configs, args)
+    val_dataset = Load_Training_Data(make_dataset(val_size), configs, args, False)
+    test_dataset = Load_Training_Data(make_dataset(test_size), configs, args)
+
+    train_loader = DataLoader(train_dataset, batch_size=configs.batch_size, shuffle=True, drop_last=False, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=configs.batch_size, shuffle=False, drop_last=False, num_workers=0)
+
+    return train_loader, val_loader, test_loader

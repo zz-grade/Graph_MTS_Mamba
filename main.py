@@ -1,15 +1,12 @@
-import torch
-import torch.nn.functional as F
 import argparse
+import importlib
 from datetime import datetime
-import numpy as np
+import torch
 from models.primary_model import Base_model
 from trainer.train_Graph_MTS import Trainer
-from utils import _logger, set_requires_grad
-from huggingface_hub.utils import experimental
-from torch_geometric.datasets import KarateClub
+from utils import _logger, fix_randomness
 import os
-from loader_data.Gnn_dataloader import data_generator
+from loader_data.Gnn_dataloader import data_generator, data_generator2, synthetic_data_generator
 
 
 start_time = datetime.now()
@@ -31,10 +28,47 @@ parser.add_argument('--device', default='cuda', type=str,
                     help='cpu or cuda')
 parser.add_argument('--home_path', default=home_dir, type=str,
                     help='Project home directory')
+parser.add_argument('--data_path', default=None, type=str,
+                    help='Dataset directory. Defaults to <home_path>/data/<selected_dataset>')
+parser.add_argument('--num_runs', default=1, type=int,
+                    help='Number of repeated runs with consecutive seeds')
+parser.add_argument('--smoke_test', action='store_true',
+                    help='Run a one-epoch synthetic-data sanity check without dataset files')
 
 
-def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug2):
-    device = torch.device(args.device)
+def apply_config_defaults(configs):
+    total_nodes = max(1, configs.num_nodes * getattr(configs, "convo_time_length", 1))
+    defaults = {
+        "weight_decay": 3e-4,
+        "mlp_hidden": getattr(configs, "dimension_token", configs.hidden_channels) * 4,
+        "mpnn_layer": 1,
+        "edge_num": min(10, max(1, total_nodes - 1)),
+        "similar_edge": min(7, max(1, total_nodes - 1)),
+        "random_edge": 0,
+        "sample_num": getattr(configs, "repeat_sample", 1),
+        "num_anchors": min(8, max(1, configs.num_nodes)),
+    }
+    for name, value in defaults.items():
+        if not hasattr(configs, name):
+            setattr(configs, name, value)
+
+
+def configure_smoke_test(configs):
+    configs.num_epoch = 1
+    configs.batch_size = min(4, max(2, configs.num_classes))
+    configs.batch_size_test = configs.batch_size
+    configs.drop_last = False
+    configs.wavelet_aug = False
+
+
+def load_configs(dataset_name):
+    module = importlib.import_module(f"config_files.{dataset_name}_Configs")
+    return module.Config()
+
+
+def main(configs, args):
+    device_name = args.device if args.device == 'cpu' or torch.cuda.is_available() else 'cpu'
+    device = torch.device(device_name)
     experiment_description = args.experiment_description
     method = 'GCC'
     training_mode = args.training_mode
@@ -43,10 +77,8 @@ def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug
     os.makedirs(logs_save_dir, exist_ok = True)
 
     SEED = args.seed
-    torch.manual_seed(SEED)
-    torch.backends.cudnn.deterministic = False
+    fix_randomness(SEED)
     torch.backends.cudnn.benchmark = False
-    np.random.seed(SEED)
 
     experiment_log_dir = os.path.join(logs_save_dir, experiment_description, run_description,
                                       training_mode + f"_seed_{SEED}")
@@ -55,27 +87,38 @@ def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug
     log_file_name = os.path.join(experiment_log_dir, f"logs_{datetime.now().strftime('%d_%m_%Y_%H_%M_%S')}.log")
     logger = _logger(log_file_name)
     logger.debug("=" * 45)
-    logger.debug(f'Dataset: {data_type}')
+    logger.debug(f'Dataset: {args.selected_dataset}')
     logger.debug(f'Method:  {method}')
     logger.debug(f'Mode:    {training_mode}')
+    logger.debug(f'Device:  {device}')
     logger.debug("=" * 45)
 
 
-    data_path = f"./data/{data_type}"
-    train_dl, test_dl = data_generator("/data/user_zhangzhe/data/FingerMovements", configs, args)
+    data_path = args.data_path or os.path.join(args.home_path, "data", args.selected_dataset)
+    if args.smoke_test:
+        train_dl, val_dl, test_dl = synthetic_data_generator(configs, args)
+    elif os.path.exists(os.path.join(data_path, "val.pt")):
+        train_dl, val_dl, test_dl = data_generator2(data_path, configs, args)
+    else:
+        train_file = os.path.join(data_path, "train.pt")
+        test_file = os.path.join(data_path, "test.pt")
+        if not os.path.exists(train_file) or not os.path.exists(test_file):
+            raise FileNotFoundError(
+                f"Dataset files not found in {data_path}. Expected train.pt and test.pt, "
+                "or run with --smoke_test for a synthetic sanity check."
+            )
+        train_dl, val_dl, test_dl = data_generator(data_path, configs, args, return_val=True)
 
     logger.debug("Data loaded ...")
 
-    model = Base_model(configs, args).to(device)
+    model = Base_model(configs, args, device).to(device)
 
-    model_optimizer = torch.optim.Adam(model.parameters(), lr=configs.lr, betas=(configs.beta1, configs.beta2),
-                                       weight_decay=3e-4)
+    model_optimizer = torch.optim.AdamW(model.parameters(), lr=configs.lr, betas=(configs.beta1, configs.beta2),
+                                        weight_decay=getattr(configs, "weight_decay", 3e-4))
 
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, args)
+    Trainer(model, model_optimizer, train_dl, val_dl, test_dl, device, logger, configs, args)
 
 
 
@@ -84,22 +127,16 @@ def main(configs, args,lambda1, lambda2, lambda3,num_remain_aug1, num_remain_aug
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    dataset_UEA = ['FingerMovements', 'HAR', 'ISRUC', 'ArticularyWordRecognition', 'SpokenArabicDigitsEq']
-
-    default_lambda1 = 0.7
-    default_lambda2 = 0.7
-    default_lambda3 = 0.5
-
     args = parser.parse_args()
 
-    args.selected_dataset = 'FingerMovements'
     data_type = args.selected_dataset
-    exec(f'from config_files.{data_type}_Configs import Config as Configs')
-    configs = Configs()
+    configs = load_configs(data_type)
+    apply_config_defaults(configs)
+    if args.smoke_test:
+        configure_smoke_test(configs)
 
-    num_remain_aug1 = 8
-    num_remain_aug2 = 2
-
-    for j in range(10):
-        main(configs, args, default_lambda1, default_lambda2, default_lambda3, num_remain_aug1, num_remain_aug2)
+    base_seed = args.seed
+    for run_idx in range(args.num_runs):
+        args.seed = base_seed + run_idx
+        main(configs, args)
 

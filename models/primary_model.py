@@ -1,26 +1,10 @@
 import torch.nn as nn
 import torch
-import random
-from sympy import totient
-from datetime import datetime
-import os, threading, traceback, torch
-
-from anchor_contru.Aggregate_ahchor import aggregate_nodes_to_anchors_topk
-from anchor_contru.Conv_time import TemporalConvSensorEmbed
-from anchor_contru.RouteTime import RouteTime
-from anchor_graph.Divid_graph import IntraSliceEncoder, Bidirectional_new_Mamba
-from models.Construction_anchor import AnchorRouter, SparseHBuilder
-from models.Fre_GraphCont import FreqGraphEncoder
-from models.GraphMamba import GraphMambaGMN, BidirectionalMamba
+from models.GraphMamba import GraphMambaGMN
 from models.Graph_construction import Feature_extractor_1DCNN_Tiny, Dot_Graph_Construction, Conv_GraphST, Mask_Matrix, \
-    NeuralSparseSparsifier, NeuralSparseSparsifier_Mul, Dot_Graph_Construction_weights
+    NeuralSparseSparsifier, Dot_Graph_Construction_weights
 from models.augmentation import contrastive_loss, disturbance_correlations_edge_index, \
     augment_with_adaptive_shift
-from torch.utils.checkpoint import checkpoint
-import traceback
-
-from node_aug.Chang_PointFilter import select_change_points
-from node_aug.Edge_Change import CBiasEdge
 
 
 class Base_model(nn.Module):
@@ -43,15 +27,13 @@ class Base_model(nn.Module):
 
         self.graph_weight = Dot_Graph_Construction_weights(configs.hidden_channels)
         # self.Fre_graph = FreqGraphEncoder(10, configs.num_nodes, configs.hidden_channels, args, 10, 10)
-        self.logits = nn.Linear(configs.convo_time_length * configs.hidden_channels * configs.num_nodes, configs.num_classes)
+        self.logits = nn.Linear(configs.dimension_token, configs.num_classes)
         self.seed = args.seed
         self.device = device
 
     def forward(self, data, num_remain=None):
 
         b_samples, time_length, num_nodes, dimension = data.size()  # Size of data is (bs, time_length, num_nodes, dimension)
-        data_noise = augment_with_adaptive_shift(data, self.window_size, 0.3)
-
         data = torch.transpose(data, 2, 1)  # (b_samples, num_nodes, time_length, dimension)
         data = torch.reshape(data, [b_samples * num_nodes, time_length, dimension])
         # print(datetime.now(), "训练开始--------------------------------------------------")
@@ -72,7 +54,7 @@ class Base_model(nn.Module):
         # z2 = TS_output_noise.reshape(-1, TS_output_noise.size(-1))
 
         # loss_cl = contrastive_loss(z1,z2)
-        loss_cl = 0
+        loss_cl = data.new_zeros(())
         GC_input = torch.reshape(TS_output, [b_samples, -1, num_nodes, self.hidden_dim])  # size is (b_samples, tlen, num_nodes, dimension)
         # Gc_fre, Edge_n, Edge_w = self.Fre_graph(GC_input)
 
@@ -95,13 +77,14 @@ class Base_model(nn.Module):
         # GC_output = self.Graph_Mamba(Gc_fre, Edge_n, Edge_w)
         # for i in range(0, 6):
         #     GC_output, _ = self.Graph_Mamba(GC_output, Adj_output, Adj_weight, Adj_input)
-        GC_output, _ = self.Graph_Mamba(GC_input, Adj_output, Adj_weight, Adj_input)
-        GC_output = torch.reshape(GC_output, [b_samples, -1, num_nodes, self.output_dim])
-        logits_input = torch.reshape(GC_output, [b_samples, -1])
+        GC_output, graph_loss = self.Graph_Mamba(GC_input, Adj_output, Adj_weight, Adj_input)
+        logits_input = GC_output.mean(dim=1)
         # print(datetime.now(), "mamba提取完成")
         logits = self.logits(logits_input)
 
         logits.std()
+        if torch.is_tensor(graph_loss):
+            loss_cl = loss_cl + graph_loss
         return logits, loss_cl
 
 

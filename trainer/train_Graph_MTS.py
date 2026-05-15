@@ -1,16 +1,14 @@
 import os
-from os import write
 
 import torch.nn as nn
 import torch
 import numpy as np
 from collections import Counter
-from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import time
 
 
-def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, args):
+def Trainer(model, model_optimizer, train_dl, val_dl, test_dl, device, logger, configs, args):
     # writer = SummaryWriter("runs/mem")
     # global_step = 0
     logger.debug("Training started ....")
@@ -27,7 +25,7 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
         loss = model_train(model, model_optimizer, criterion, train_dl, device)
 
         if epoch % configs.show_interval == 0:
-            accu_val = Cross_validation(model, train_dl, device)
+            accu_val = Cross_validation(model, val_dl, device)
             rank = int(os.environ.get("RANK", "0"))
             is_main = (rank == 0)
             if is_main:
@@ -47,8 +45,17 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
     logger.debug("\n################## Training is Done! #########################")
 
 
+def _split_model_output(output):
+    if isinstance(output, tuple):
+        prediction = output[0]
+        aux_loss = output[1] if len(output) > 1 else None
+        return prediction, aux_loss
+    return output, None
+
+
 def model_train(model, model_optimizer, criterion, train_loader, device):
-    scaler = torch.amp.GradScaler('cuda')
+    use_amp = device.type == "cuda"
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
     model.train()
     # num = int(len(train_loader.dataset) * 0.8)
     # print("train_loader.dataset", len(train_loader.dataset))
@@ -61,11 +68,13 @@ def model_train(model, model_optimizer, criterion, train_loader, device):
         #     break
         data, labels = data.float().to(device, non_blocking=True), labels.long().to(device, non_blocking=True)
         model_optimizer.zero_grad()
-        with torch.amp.autocast('cuda', dtype=torch.float16):
-            prediction = model(data)
+        with torch.amp.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
+            prediction, aux_loss = _split_model_output(model(data))
             # print("prediction", prediction)
             # print("labels", labels)
             loss = criterion(prediction, labels)
+            if torch.is_tensor(aux_loss):
+                loss = loss + aux_loss
         scaler.scale(loss).backward()
         scaler.step(model_optimizer)
         scaler.update()
@@ -97,7 +106,7 @@ def Cross_validation(model, train_loader, device):
             #     continue
             data, labels = data.float().to(device), label.long().to(device)
             real_.append(label)
-            prediction = model(data)
+            prediction, _ = _split_model_output(model(data))
             prediction_.append(prediction.detach().cpu())
         prediction_ = torch.cat(prediction_, 0)
         real_ = torch.cat(real_, 0)
@@ -121,7 +130,7 @@ def Prediction(model, criterion, test_loader, device):
         for data, label in test_loader:
             data, label = data.float().to(device), label.long().to(device)
             real_.append(label)
-            prediction = model(data)
+            prediction, _ = _split_model_output(model(data))
             loss = criterion(prediction, label)
             prediction_.append(prediction.detach().cpu())
             loss_ = loss_ + loss.item()
