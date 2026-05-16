@@ -90,7 +90,7 @@ def main(configs, args):
 
     SEED = args.seed
     fix_randomness(SEED, deterministic=args.deterministic,
-                   warn_only=not args.strict_determinism)
+                   warn_only=args.strict_determinism)
 
     experiment_log_dir = os.path.join(logs_save_dir, experiment_description, run_description,
                                       training_mode + f"_seed_{SEED}")
