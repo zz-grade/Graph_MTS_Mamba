@@ -24,10 +24,13 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
     prediction_ = []
     labels = []
 
+    use_amp = args.amp and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+
     for epoch in range(1, configs.num_epoch + 1):
         # train_sampler.set_epoch(epoch)
         # test_sampler.set_epoch(epoch)
-        loss = model_train(model, model_optimizer, criterion, train_dl, device, epoch)
+        loss = model_train(model, model_optimizer, criterion, train_dl, device, epoch, scaler, use_amp)
 
         if epoch % configs.show_interval == 0:
             accu_val = Cross_validation(model, train_dl, device)
@@ -50,8 +53,7 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
     logger.debug("\n################## Training is Done! #########################")
 
 
-def model_train(model, model_optimizer, criterion, train_loader, device, epoch):
-    scaler = torch.amp.GradScaler('cuda')
+def model_train(model, model_optimizer, criterion, train_loader, device, epoch, scaler, use_amp):
     model.train()
     # num = int(len(train_loader.dataset) * 0.8)
     # print("train_loader.dataset", len(train_loader.dataset))
@@ -68,7 +70,7 @@ def model_train(model, model_optimizer, criterion, train_loader, device, epoch):
         #     break
         data, labels = data.float().to(device, non_blocking=True), labels.long().to(device, non_blocking=True)
         model_optimizer.zero_grad(set_to_none=True)
-        with torch.amp.autocast('cuda', dtype=torch.float16):
+        with torch.amp.autocast('cuda', dtype=torch.float16, enabled=use_amp):
             prediction, loss_xx = model(data)
             # print("prediction", prediction)
             # print("labels", labels)
