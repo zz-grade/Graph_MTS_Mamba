@@ -138,8 +138,9 @@ class GraphMambaGMN(nn.Module):
     def forward(self, x, edge_index_big, edge_weight_big, adj):
         device = x.device
         b_samples, num_node, dimension = x.size()
+
         L = self.convo_time_length
-        num_node /= L
+        num_node = 144
 
         node_token_feats_list = []
         perm_batch_list = []
@@ -151,7 +152,7 @@ class GraphMambaGMN(nn.Module):
         # node_token_feats = self.gnn_pre(x,edge_index_big,adj)
         # print(datetime.now(), "子图构建及编码完成")
 
-        b_samples, num_node, _, dimension = node_token_feats.size()
+        b_samples, _, _, dimension = node_token_feats.size()
 
         # # 你需要提供/保存 N 和 F（freq bins）
         # # N = num_nodes (传感器数)
@@ -185,7 +186,6 @@ class GraphMambaGMN(nn.Module):
         # # 取最后一个频率 token（也可以改成 mean/max/attention）
         # node_repr_all = h_freq[:, -1, :]  # (B*N, D)
         # node_repr_global_1 = node_repr_all.view(b_samples, N, dimension)  # (B,N,D)
-
         # ========== 1) 时间片内：节点编码（沿 N 维）==========
         # (B, N, L, D) -> (B*L, N, D)
         x_intra = node_token_feats.permute(0, 2, 1, 3).contiguous().view(b_samples * L, -1, dimension)
@@ -197,8 +197,8 @@ class GraphMambaGMN(nn.Module):
         x_intra = x_intra.view(b_samples, L, -1, dimension).permute(0, 2, 1, 3).contiguous()
 
         # ========== 2) 排序（如果你仍然要按 perm 排节点序）==========
-        perm_expanded = perm_batch.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, L, dimension)  # (B,N,L,D)
-        x_sorted = torch.gather(x_intra, 1, perm_expanded.to(device))  # (B,N,L,D)
+        # perm_expanded = perm_batch.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, L, dimension)  # (B,N,L,D)
+        # x_sorted = torch.gather(x_intra, 1, perm_expanded.to(device))  # (B,N,L,D)
 
         # x_intra: (B, N, L, D)
         # 先把每个节点在时间上做个summary用于打分（比如取最后时刻或均值）
@@ -208,7 +208,7 @@ class GraphMambaGMN(nn.Module):
 
         # ========== 3) 全局：跨时间 mamba（沿 L 维）==========
         # (B,N,L,D) -> (B*N, L, D)
-        h_time = x_sorted.view(b_samples * num_node, L, dimension)
+        h_time = x_intra.view(b_samples * num_node, L, dimension)
         for layer in self.global_mamba:
             h_time = layer(h_time)  # (B*N, L, D)
         node_repr_all = h_time[:, -1, :]  # (B*N, D)

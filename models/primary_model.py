@@ -40,7 +40,7 @@ class Base_model(nn.Module):
 
         self.graph_weight = Dot_Graph_Construction_weights(configs.hidden_channels)
         # self.Fre_graph = FreqGraphEncoder(10, configs.num_nodes, configs.hidden_channels, args, 10, 10)
-        self.logits = nn.Linear(configs.convo_time_length * configs.hidden_channels * configs.num_nodes, configs.num_classes)
+        self.logits = nn.Linear(64 * configs.num_nodes, configs.num_classes)
         self.seed = args.seed
         self.device = device
 
@@ -93,7 +93,8 @@ class Base_model(nn.Module):
         # for i in range(0, 6):
         #     GC_output, _ = self.Graph_Mamba(GC_output, Adj_output, Adj_weight, Adj_input)
         GC_output, graph_loss = self.Graph_Mamba(GC_input, Adj_output, Adj_weight, Adj_input)
-        logits_input = GC_output.mean(dim=1)
+        logits_input = torch.reshape(GC_output, [b_samples, -1])
+        # logits_input = GC_output.mean(dim=1)
         # print(datetime.now(), "mamba提取完成")
         logits = self.logits(logits_input)
 
