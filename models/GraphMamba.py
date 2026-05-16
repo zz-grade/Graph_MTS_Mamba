@@ -354,7 +354,7 @@ class UFGConv(MessagePassing):
 
 
 
-def node_info_nce_cross_graph_only(z1, z2, tau=0.2, chunk_size=128):
+def node_info_nce_cross_graph_only(z1, z2, tau=0.2, chunk_size=128, K=32):
     """
     z1, z2: (B, N, D)
     正样本：(b,i) <-> (b,i)
@@ -362,8 +362,11 @@ def node_info_nce_cross_graph_only(z1, z2, tau=0.2, chunk_size=128):
     """
     b_samples, N, D = z1.shape
 
-
-    idx = torch.randperm(N, device=z1.device)[:32]  # (K,)
+    idx = torch.div(
+        torch.arange(K, device=z1.device) * N,
+        K,
+        rounding_mode="floor",
+    )
     z1 = z1[:, idx, :]  # (B, K, D)
     z2 = z2[:, idx, :]
 
