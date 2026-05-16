@@ -139,6 +139,7 @@ class GraphMambaGMN(nn.Module):
         device = x.device
         b_samples, num_node, dimension = x.size()
         L = self.convo_time_length
+        num_node /= L
 
         node_token_feats_list = []
         perm_batch_list = []
@@ -150,7 +151,7 @@ class GraphMambaGMN(nn.Module):
         # node_token_feats = self.gnn_pre(x,edge_index_big,adj)
         # print(datetime.now(), "子图构建及编码完成")
 
-        b_samples, num_node, L, dimension = node_token_feats.size()
+        b_samples, num_node, _, dimension = node_token_feats.size()
 
         # # 你需要提供/保存 N 和 F（freq bins）
         # # N = num_nodes (传感器数)
@@ -187,13 +188,13 @@ class GraphMambaGMN(nn.Module):
 
         # ========== 1) 时间片内：节点编码（沿 N 维）==========
         # (B, N, L, D) -> (B*L, N, D)
-        x_intra = node_token_feats.permute(0, 2, 1, 3).contiguous().view(b_samples * L, num_node, dimension)
+        x_intra = node_token_feats.permute(0, 2, 1, 3).contiguous().view(b_samples * L, -1, dimension)
         # x_intra = node_token_feats
         for layer in self.local_mamba:  # 你需要新加这个模块列表
             x_intra = layer(x_intra)  # 仍是 (B*L, N, D)
 
         # 回到 (B, N, L, D)
-        x_intra = x_intra.view(b_samples, L, num_node, dimension).permute(0, 2, 1, 3).contiguous()
+        x_intra = x_intra.view(b_samples, L, -1, dimension).permute(0, 2, 1, 3).contiguous()
 
         # ========== 2) 排序（如果你仍然要按 perm 排节点序）==========
         perm_expanded = perm_batch.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, L, dimension)  # (B,N,L,D)
@@ -237,7 +238,7 @@ class GraphMambaGMN(nn.Module):
         loss_con = node_info_nce_cross_graph_only(z2, z1)
         # print(datetime.now(), "对比损失计算完成")
         # print(datetime.now(), "对比学习结束")
-        return node_repr_global_1, loss_con
+        return node_repr_global_1, loss_cl
 
     def _merge_edge_index_list(self, edge_index_list_in, b_samples, num_node, device):
         # edge_index_list_in: list长度B，每个是 (2, E_b)
@@ -258,27 +259,26 @@ class GraphMambaGMN(nn.Module):
 
 
     def Graph_del(self, x, edge_index_big, edge_weight_big, b_samples, num_node, device):
-        # x: (B, N, F)
+        # x: (B, N, D)
         x = x.to(device)
         B, N, F = x.shape
-        assert B == b_samples and N == num_node
 
         # edge_index_big: (2, E)  节点编号范围应在 [0, B*N-1]
         if edge_index_big.device != device:
             edge_index_big = edge_index_big.to(device)
 
-        # 2) 合并节点特征： (B,N,F) -> (B*N, F)
-        x_flat = x.reshape(b_samples * num_node, F)
+        # 2) 合并节点特征： (B,N,D) -> (B*N, D)
+        x_flat = x.reshape(b_samples * N, F)
 
         # 3) 一次跑完 MPNN：输出 (B*N, D)
         neigh_flat = self.mpnn(x_flat, edge_index_big, edge_weight_big)  # (B*N, D)
 
         # 4) 还原形状给后面用： (B*N, D) -> (B,N,1,D)
-        node_token_feats = neigh_flat.view(b_samples, num_node, -1).unsqueeze(2)  # (B,N,1,D)
+        node_token_feats = neigh_flat.view(b_samples, N, -1).unsqueeze(2)  # (B,N,1,D)
 
         # 5) perm / inv_perm
-        base_perm = torch.arange(num_node, device=device, dtype=torch.long)
-        perm_batch = base_perm.unsqueeze(0).expand(b_samples, num_node).contiguous()  # (B,N)
+        base_perm = torch.arange(N, device=device, dtype=torch.long)
+        perm_batch = base_perm.unsqueeze(0).expand(b_samples, N).contiguous()  # (B,N)
         inv_perm_batch = perm_batch.clone()  # (B,N)
 
         return node_token_feats, perm_batch, inv_perm_batch, edge_index_big
@@ -352,42 +352,7 @@ class UFGConv(MessagePassing):
 
 
 
-class MPNN_nk(MessagePassing):
-    def __init__(self, in_fea, out_fea, mpnn_layer):
-        super().__init__()
-        self.msg_mlps = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(in_fea, out_fea),
-                nn.ReLU(),
-                nn.Linear(out_fea, out_fea)
-            )
-            for _ in range(mpnn_layer)
-        ])
-        self.upd_mlps = nn.ModuleList([
-            nn.Sequential(
-            nn.Linear(in_fea+out_fea, out_fea),
-            nn.ReLU(),
-            nn.Linear(out_fea, out_fea),
-            )
-            for _ in range(mpnn_layer)
-        ])
 
-        # 残差投影（防止维度不一致）
-        if in_fea != out_fea:
-            self.res_proj = nn.Linear(in_fea, out_fea)
-        else:
-            self.res_proj = nn.Identity()
-
-    def forward(self, x, edge_index, edge_weight):
-        for msg_mlp, upd_mlp in zip(self.msg_mlps, self.upd_mlps):
-            identity = self.res_proj(x)
-            m = self.propagate(edge_index, x=x, edge_weight=edge_weight, msg_mlp=msg_mlp)
-            out = upd_mlp(torch.cat([x, m], dim=-1))
-            x = out + identity
-        return x
-
-    def message(self, x_j, edge_weight, msg_mlp):
-        return msg_mlp(x_j) * edge_weight.unsqueeze(-1)
 
 def node_info_nce_cross_graph_only(z1, z2, tau=0.2, chunk_size=128):
     """
@@ -588,3 +553,41 @@ def build_feature_perturbed_view(
         z = feature_noise(z, noise_std=noise_std, training=training)
 
     return z
+
+
+class MPNN_nk(MessagePassing):
+    def __init__(self, in_fea, out_fea, mpnn_layer):
+        super().__init__()
+        self.msg_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_fea, out_fea),
+                nn.ReLU(),
+                nn.Linear(out_fea, out_fea)
+            )
+            for _ in range(mpnn_layer)
+        ])
+        self.upd_mlps = nn.ModuleList([
+            nn.Sequential(
+            nn.Linear(in_fea+out_fea, out_fea),
+            nn.ReLU(),
+            nn.Linear(out_fea, out_fea),
+            )
+            for _ in range(mpnn_layer)
+        ])
+
+        # 残差投影（防止维度不一致）
+        if in_fea != out_fea:
+            self.res_proj = nn.Linear(in_fea, out_fea)
+        else:
+            self.res_proj = nn.Identity()
+
+    def forward(self, x, edge_index, edge_weight):
+        for msg_mlp, upd_mlp in zip(self.msg_mlps, self.upd_mlps):
+            identity = self.res_proj(x)
+            m = self.propagate(edge_index, x=x, edge_weight=edge_weight, msg_mlp=msg_mlp)
+            out = upd_mlp(torch.cat([x, m], dim=-1))
+            x = out + identity
+        return x
+
+    def message(self, x_j, edge_weight, msg_mlp):
+        return msg_mlp(x_j) * edge_weight.unsqueeze(-1)

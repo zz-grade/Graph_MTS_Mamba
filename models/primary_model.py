@@ -9,6 +9,7 @@ import os, threading, traceback, torch
 from models.Construction_anchor import AnchorRouter, SparseHBuilder
 from models.Fre_GraphCont import FreqGraphEncoder
 from models.GraphMamba import GraphMambaGMN, BidirectionalMamba
+from models.Graph_GNN import GraphGNN
 from models.Graph_construction import Feature_extractor_1DCNN_Tiny, Dot_Graph_Construction, Conv_GraphST, Mask_Matrix, \
     NeuralSparseSparsifier, Dot_Graph_Construction_weights
 from models.augmentation import contrastive_loss, disturbance_correlations_edge_index, \
@@ -35,10 +36,11 @@ class Base_model(nn.Module):
                                                                    configs.kernel_size, configs.stride, configs.dropout)
         self.sparseEdge = NeuralSparseSparsifier(configs, configs.edge_num, configs.similar_edge, configs.hidden_channels)
         self.Graph_Mamba = GraphMambaGMN(configs, args)
+        self.imdiscover = GraphGNN(configs, args)
 
         self.graph_weight = Dot_Graph_Construction_weights(configs.hidden_channels)
         # self.Fre_graph = FreqGraphEncoder(10, configs.num_nodes, configs.hidden_channels, args, 10, 10)
-        self.logits = nn.Linear(configs.dimension_token, configs.num_classes)
+        self.logits = nn.Linear(configs.convo_time_length * configs.hidden_channels * configs.num_nodes, configs.num_classes)
         self.seed = args.seed
         self.device = device
 
@@ -71,7 +73,7 @@ class Base_model(nn.Module):
 
 
         # GC_input = torch.reshape(GC_input, [-1, num_nodes, self.hidden_dim])  # size is (b_samples * tlen, num_nodes, dimension)
-        GC_input = torch.reshape(GC_input, [b_samples, -1, self.hidden_dim])  # size is (b_samples * tlen, num_nodes, dimension)
+        GC_input = torch.reshape(GC_input, [b_samples, -1, self.hidden_dim])  # size is (b_samples, tlen * num_nodes, dimension)
         # print(datetime.now(), "构建时间戳图开始")
         Adj_input = Dot_Graph_Construction(GC_input, self.device)
         # Adj_input = self.graph_weight(GC_input)
@@ -81,6 +83,8 @@ class Base_model(nn.Module):
         # GC_input = torch.reshape(GC_input, [-1, num_nodes, self.hidden_dim])
         GC_input = torch.reshape(GC_input, [b_samples, -1, self.hidden_dim])
         Adj_output, Adj_weight = self.sparseEdge(GC_input, Adj_input, num_nodes)
+
+        # self.imdiscover(GC_input, Adj_output, Adj_weight)
         # Adj_input = disturbance_correlations_edge_index(Adj_input, 10)
         # print(datetime.now(), "构建时间戳图完成")
         # rng = random.Random(self.seed)
