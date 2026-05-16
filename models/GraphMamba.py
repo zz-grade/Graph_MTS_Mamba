@@ -238,7 +238,7 @@ class GraphMambaGMN(nn.Module):
         loss_con = node_info_nce_cross_graph_only(z2, z1)
         # print(datetime.now(), "对比损失计算完成")
         # print(datetime.now(), "对比学习结束")
-        return node_repr_global_1, loss_cl
+        return node_repr_global_1, loss_con
 
     def _merge_edge_index_list(self, edge_index_list_in, b_samples, num_node, device):
         # edge_index_list_in: list长度B，每个是 (2, E_b)

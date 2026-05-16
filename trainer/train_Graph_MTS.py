@@ -79,8 +79,8 @@ def model_train(model, model_optimizer, criterion, train_loader, device, epoch):
         scaler.scale(loss).backward()
         # if epoch>=30:
         #     # 先反缩放
-        #     scaler.unscale_(model_optimizer)
-        #     fim_l1, scale = apply_fic_constraint(model, 20)
+        scaler.unscale_(model_optimizer)
+        fim_l1, scale = apply_fic_constraint(model, 20)
         # print(f"fim_l1={fim_l1:.6f}, scale={scale:.6f}")
         # print(datetime.now(), "反向传递完成")
         scaler.step(model_optimizer)
