@@ -70,7 +70,7 @@ def model_train(model, model_optimizer, criterion, train_loader, device, epoch, 
         data, labels = data.float().to(device, non_blocking=True), labels.long().to(device, non_blocking=True)
         model_optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast('cuda', dtype=torch.float16, enabled=use_amp):
-            prediction, loss_xx = model(data)
+            prediction, loss_xx = model(data, labels=labels)
             # print("prediction", prediction)
             # print("labels", labels)
             loss_cls = criterion(prediction, labels)
@@ -239,3 +239,5 @@ def apply_fic_constraint(model, epsilon: float, eps: float = 1e-12):
         scale = torch.tensor(1.0, device=device, dtype=fim_l1.dtype)
 
     return fim_l1.item(), scale.item()
+
+

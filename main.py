@@ -96,7 +96,7 @@ def main(configs, args):
                                       training_mode + f"_seed_{SEED}")
     os.makedirs(experiment_log_dir, exist_ok=True)
 
-    log_file_name = os.path.join(experiment_log_dir, f"logs_{datetime.now().strftime('%d_%m')}_无对比.log")
+    log_file_name = os.path.join(experiment_log_dir, f"logs_{datetime.now().strftime('%d_%m')}_监督对比.log")
     logger = _logger(log_file_name)
     logger.debug("=" * 45)
     logger.debug(f'Dataset: {args.selected_dataset}')

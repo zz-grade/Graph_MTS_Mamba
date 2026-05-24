@@ -44,7 +44,15 @@ class Base_model(nn.Module):
         self.seed = args.seed
         self.device = device
 
-    def forward(self, data, num_remain=None):
+        self.supcon_head = nn.Sequential(
+            nn.Linear(64 * configs.num_nodes, 256),
+            nn.ReLU(inplace=True),
+            nn.Linear(256, 128),
+        )
+        self.supcon_weight = getattr(configs, "supcon_weight", 0.05)
+        self.supcon_temperature = getattr(configs, "supcon_temperature", 0.2)
+
+    def forward(self, data, labels=None, num_remain=None):
 
         b_samples, time_length, num_nodes, dimension = data.size()  # Size of data is (bs, time_length, num_nodes, dimension)
         data = torch.transpose(data, 2, 1)  # (b_samples, num_nodes, time_length, dimension)
@@ -98,7 +106,13 @@ class Base_model(nn.Module):
         # print(datetime.now(), "mamba提取完成")
         logits = self.logits(logits_input)
 
-        logits.std()
+        if labels is not None and self.training:
+            z = self.supcon_head(logits_input)
+            supcon_loss = supervised_contrastive_loss(
+                z, labels, temperature=self.supcon_temperature
+            )
+            loss_cl = loss_cl + self.supcon_weight * supcon_loss
+
         if torch.is_tensor(graph_loss):
             loss_cl = loss_cl + graph_loss
         return logits, loss_cl
@@ -276,3 +290,23 @@ class Base_model02(nn.Module):
         logits = self.head(z)
         return logits
 
+def supervised_contrastive_loss(features, labels, temperature=0.2):
+    features = torch.nn.functional.normalize(features, dim=-1)
+    labels = labels.view(-1, 1)
+
+    logits = features @ features.T / temperature
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+
+    self_mask = torch.eye(labels.size(0), device=features.device, dtype=torch.bool)
+    pos_mask = labels.eq(labels.T) & ~self_mask
+
+    exp_logits = torch.exp(logits).masked_fill(self_mask, 0.0)
+    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12))
+
+    pos_count = pos_mask.sum(dim=1)
+    valid = pos_count > 0
+    if not valid.any():
+        return features.new_zeros(())
+
+    loss = -(log_prob * pos_mask).sum(dim=1) / pos_count.clamp_min(1)
+    return loss[valid].mean()
