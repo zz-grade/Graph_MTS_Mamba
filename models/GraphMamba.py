@@ -218,7 +218,7 @@ class GraphMambaGMN(nn.Module):
 
 
         # print(datetime.now(), "对比学习开始")
-        #
+        z = build_feature_perturbed_view(node_repr_global_1)
         # # print("对比学习之前", torch.cuda.memory_allocated() / 1024 ** 3, "GB")
         z1 = self.proj(node_repr_global_1)  # (B,N,Dproj)
         z2 = self.proj(node_repr_global_1)  # (B,N,Dproj)
@@ -238,7 +238,7 @@ class GraphMambaGMN(nn.Module):
         loss_con = node_info_nce_cross_graph_only(z2, z1)
         # print(datetime.now(), "对比损失计算完成")
         # print(datetime.now(), "对比学习结束")
-        return node_repr_global_1, loss_con
+        return node_repr_global_1, loss_cl
 
     def _merge_edge_index_list(self, edge_index_list_in, b_samples, num_node, device):
         # edge_index_list_in: list长度B，每个是 (2, E_b)
@@ -539,7 +539,7 @@ def build_feature_perturbed_view(
     drop_prob=0.2,
     noise_std=0.01,
     training=True,
-    use_dropout=True,
+    use_dropout=False,
     use_noise=True,
 ):
     """

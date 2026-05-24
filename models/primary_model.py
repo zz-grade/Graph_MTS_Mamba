@@ -11,7 +11,7 @@ from models.Fre_GraphCont import FreqGraphEncoder
 from models.GraphMamba import GraphMambaGMN, BidirectionalMamba
 from models.Graph_GNN import GraphGNN
 from models.Graph_construction import Feature_extractor_1DCNN_Tiny, Dot_Graph_Construction, Conv_GraphST, Mask_Matrix, \
-    NeuralSparseSparsifier, Dot_Graph_Construction_weights
+    NeuralSparseSparsifier, Dot_Graph_Construction_weights, NeuralSparseSparsifier_Mul
 from models.augmentation import contrastive_loss, disturbance_correlations_edge_index, \
     augment_with_adaptive_shift
 from torch.utils.checkpoint import checkpoint
@@ -101,7 +101,6 @@ class Base_model(nn.Module):
         logits.std()
         if torch.is_tensor(graph_loss):
             loss_cl = loss_cl + graph_loss
-        loss_cl = 0
         return logits, loss_cl
 
 

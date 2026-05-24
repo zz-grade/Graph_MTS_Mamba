@@ -6,7 +6,6 @@ import torch
 import numpy as np
 from collections import Counter
 
-from srsly.msgpack import epoch
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import time
