@@ -74,7 +74,7 @@ def model_train(model, model_optimizer, criterion, train_loader, device, epoch, 
             # print("prediction", prediction)
             # print("labels", labels)
             loss_cls = criterion(prediction, labels)
-            loss = loss_cls + 0.1 * loss_xx
+            loss = loss_cls + 0.4 * loss_xx
 
         # print(datetime.now(), "反向传递开始")
         scaler.scale(loss).backward()

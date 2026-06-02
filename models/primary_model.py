@@ -49,7 +49,7 @@ class Base_model(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(256, 128),
         )
-        self.supcon_weight = getattr(configs, "supcon_weight", 0.05)
+        self.supcon_weight = getattr(configs, "supcon_weight", 0.5)
         self.supcon_temperature = getattr(configs, "supcon_temperature", 0.2)
 
     def forward(self, data, labels=None, num_remain=None):
@@ -111,7 +111,7 @@ class Base_model(nn.Module):
             supcon_loss = supervised_contrastive_loss(
                 z, labels, temperature=self.supcon_temperature
             )
-            loss_cl = loss_cl + self.supcon_weight * supcon_loss
+            loss_cl = supcon_loss
 
         if torch.is_tensor(graph_loss):
             loss_cl = loss_cl + graph_loss

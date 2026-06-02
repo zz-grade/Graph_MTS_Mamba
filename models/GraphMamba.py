@@ -65,6 +65,7 @@ class GraphMambaGMN(nn.Module):
         self.b_sample = configs
 
         self.convo_time_length = configs.convo_time_length
+        self.num_nodes = configs.num_nodes
         self.pool_nn = DiffPoolForBNLD_NoEmbed(64, configs.num_anchors)
 
     def run_global_mamba_time_split(self, h_in, T_len, num):
@@ -140,7 +141,7 @@ class GraphMambaGMN(nn.Module):
         b_samples, num_node, dimension = x.size()
 
         L = self.convo_time_length
-        num_node = 144
+        num_node = self.num_nodes
 
         node_token_feats_list = []
         perm_batch_list = []

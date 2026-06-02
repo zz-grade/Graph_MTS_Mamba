@@ -50,13 +50,10 @@ class NeuralSparseSparsifier(nn.Module):
         )
         self.edge_num = configs.edge_num
         self.similar_edge = configs.similar_edge
-        self.max_hop = configs.max_hop
-        self.ran_num = configs.ran_num
-        self.sample_num = configs.sample_num
         # 让 alpha 也变成可学习（可选）
         self.log_alpha = nn.Parameter(torch.log(torch.tensor(0.1, dtype=torch.float32)))
         # 控制自学习边权影响强度
-        self.log_beta = nn.Parameter(torch.log(torch.tensor(0.5, dtype=torch.float32)))
+        self.log_beta = nn.Parameter(torch.log(torch.tensor(1.0, dtype=torch.float32)))
 
         # 根据一条边两端节点特征，学习这条边的 gate
         # 输入维度 = x_src + x_dst + |x_src-x_dst| + x_src*x_dst + dt + prior_w
@@ -146,7 +143,7 @@ class NeuralSparseSparsifier(nn.Module):
         ], dim=-1)  # (E, 4D+2)
 
         learned_logit = self.edge_mlp(edge_feat).squeeze(-1)
-        learned_gate = 1.0 + torch.tanh(beta * learned_logit)
+        learned_gate = beta * torch.sigmoid(learned_logit)
         edge_weight = prior_w * learned_gate
 
         return edge_index_big, edge_weight
