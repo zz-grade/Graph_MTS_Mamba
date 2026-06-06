@@ -4,14 +4,14 @@ class Config(object):
         # self.input_channels = 28
         self.num_nodes = 9
 
-        self.window_size = 8
-        self.time_denpen_len = 16
+        self.window_size = 16
+        self.time_denpen_len = 8
 
-        self.convo_time_length = 11
+        self.convo_time_length = 17
         # self.features_len = 18
 
 
-        self.kernel_size = 3
+        self.kernel_size = 4
         self.stride = 1
 
         self.hidden_channels = 64
@@ -34,7 +34,8 @@ class Config(object):
         # optimizer parameters
         self.beta1 = 0.9
         self.beta2 = 0.99
-        self.lr = 3e-4
+        self.lr = 5e-4
+        self.weight_decay = 3e-4
 
         # data parameters
         self.drop_last = True
@@ -44,14 +45,12 @@ class Config(object):
         self.Context_Cont = Context_Cont_configs()
         self.augmentation = augmentations()
 
-        self.dimension_token = 64
+        self.dimension_token = 128
         self.dimension_state = 64
         self.dimension_conv = 4
         self.expand = 2
         self.num_local_layers = 2
-        self.num_global_layers = 3
-
-        self.use_mpnn = 0
+        self.num_global_layers = 2
 
         self.max_hop = 4
         self.ran_num = 4
@@ -60,6 +59,12 @@ class Config(object):
         self.show_interval = 1
 
         self.decay_rate = 0.7
+
+        self.use_mpnn = 1
+        self.mpnn_layer = 1
+        self.log_beta = 3.0
+        self.supcon_weight = 0.3
+        self.epsilon = 20
 
 
 class augmentations(object):

@@ -12,14 +12,14 @@ class Config(object):
         self.window_size_val = 5
         self.time_denpen_len_val = 10
 
-        self.convo_time_length = 9
+        self.convo_time_length = 7
         # self.features_len = 18
 
 
-        self.kernel_size = 4
+        self.kernel_size = 5
         self.stride = 1
 
-        self.hidden_channels = 64
+        self.hidden_channels = 128
         self.final_out_channels = 64
         #
         # self.hidden_channels = 96
@@ -31,11 +31,11 @@ class Config(object):
 
 
         self.num_classes = 2
-        self.dropout = 0.1
+        self.dropout = 0.2
         # self.features_len = 18
 
         # training configs
-        self.num_epoch = 40
+        self.num_epoch = 50
 
         # optimizer parameters
         self.beta1 = 0.9
@@ -45,32 +45,36 @@ class Config(object):
 
         # data parameters
         self.drop_last = False
-        self.batch_size = 128
-        self.batch_size_test = 16
+        self.batch_size = 64
+        self.batch_size_test = 64
 
         self.Context_Cont = Context_Cont_configs()
         self.augmentation = augmentations()
 
-        self.dimension_token = 64
+        self.dimension_token = 128
         self.dimension_state = 64
-        self.dimension_conv = 4
-        self.expand = 2
-        self.num_local_layers = 1
-        self.num_global_layers = 1
+        self.dimension_conv = 5
+        self.expand = 4
+        self.num_local_layers = 2
+        self.num_global_layers = 2
 
         self.use_mpnn = 1
 
-        self.max_hop = 5
-        self.ran_num = 2
-        self.repeat_sample = 2
+        self.max_hop = 6
+        self.ran_num = 3
+        self.repeat_sample = 1
 
         self.show_interval = 1
+        self.mlp_hidden = 256
 
         self.decay_rate = 0.7
 
         self.mpnn_layer = 1
-        self.edge_num = 10
-        self.similar_edge = 7
+        self.log_beta = 3.0
+        self.supcon_weight = 0.3
+        self.epsilon = 20
+        self.edge_num = 5
+        self.similar_edge = 1
 
 
 class augmentations(object):

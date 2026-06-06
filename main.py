@@ -33,7 +33,7 @@ parser.add_argument('--home_path', default=home_dir, type=str,
                     help='Project home directory')
 parser.add_argument('--data_path', default=None, type=str,
                     help='Dataset directory. Defaults to <home_path>/data/<selected_dataset>')
-parser.add_argument('--num_runs', default=1, type=int,
+parser.add_argument('--num_runs', default=10, type=int,
                     help='Number of repeated runs with consecutive seeds')
 parser.add_argument('--smoke_test', action='store_true',
                     help='Run a one-epoch synthetic-data sanity check without dataset files')
@@ -96,7 +96,7 @@ def main(configs, args):
                                       training_mode + f"_seed_{SEED}")
     os.makedirs(experiment_log_dir, exist_ok=True)
 
-    log_file_name = os.path.join(experiment_log_dir, f"logs_{datetime.now().strftime('%d_%m')}_监督对比.log")
+    log_file_name = os.path.join(experiment_log_dir, f"logs_{datetime.now().strftime('%d_%m')}_Face_two.log")
     logger = _logger(log_file_name)
     logger.debug("=" * 45)
     logger.debug(f'Dataset: {args.selected_dataset}')

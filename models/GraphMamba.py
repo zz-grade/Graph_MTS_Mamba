@@ -67,6 +67,13 @@ class GraphMambaGMN(nn.Module):
         self.convo_time_length = configs.convo_time_length
         self.num_nodes = configs.num_nodes
         self.pool_nn = DiffPoolForBNLD_NoEmbed(64, configs.num_anchors)
+        self.graph_mode = "true"
+
+        self.node_encoder = nn.Sequential(
+            nn.Linear(configs.hidden_channels, d_model),
+            nn.LayerNorm(d_model),
+            nn.ReLU()
+        )
 
     def run_global_mamba_time_split(self, h_in, T_len, num):
         # h_in: (B_eff, N, D) where B_eff = B*T
@@ -136,7 +143,7 @@ class GraphMambaGMN(nn.Module):
 
 
 
-    def forward(self, x, edge_index_big, edge_weight_big, adj):
+    def forward(self, x, edge_index_big, edge_weight_big, adj, Adj_topk, Adj_k_weight):
         device = x.device
         b_samples, num_node, dimension = x.size()
 
@@ -150,6 +157,7 @@ class GraphMambaGMN(nn.Module):
         # print(datetime.now(), "mamba训练开始")
         # print(b_samples, "每批次样本数")
         node_token_feats, perm_batch, inv_perm_batch, edge_index_big = self.Graph_del(x, edge_index_big, edge_weight_big, b_samples, num_node, device)
+        node_token_feat_topk, _, _, _ = self.Graph_del(x, Adj_topk, Adj_k_weight, b_samples, num_node, device)
         # node_token_feats = self.gnn_pre(x,edge_index_big,adj)
         # print(datetime.now(), "子图构建及编码完成")
 
@@ -236,7 +244,7 @@ class GraphMambaGMN(nn.Module):
 
         # # print(datetime.now(), "对比损失计算开始")
         # # print("计算损失函数之前", torch.cuda.memory_allocated() / 1024 ** 3, "GB")
-        loss_con = node_info_nce_cross_graph_only(z2, z1)
+        # loss_con = node_info_nce_cross_graph_only(z2, z1)
         # print(datetime.now(), "对比损失计算完成")
         # print(datetime.now(), "对比学习结束")
         return node_repr_global_1, loss_cl
@@ -271,8 +279,16 @@ class GraphMambaGMN(nn.Module):
         # 2) 合并节点特征： (B,N,D) -> (B*N, D)
         x_flat = x.reshape(b_samples * N, F)
 
+        if self.graph_mode == "none":
+            neigh_flat = self.node_encoder(x_flat)
+        else:
+            neigh_flat = self.mpnn(
+                x_flat,
+                edge_index_big,
+                edge_weight_big
+            )
         # 3) 一次跑完 MPNN：输出 (B*N, D)
-        neigh_flat = self.mpnn(x_flat, edge_index_big, edge_weight_big)  # (B*N, D)
+        # neigh_flat = self.mpnn(x_flat, edge_index_big, edge_weight_big)  # (B*N, D)
 
         # 4) 还原形状给后面用： (B*N, D) -> (B,N,1,D)
         node_token_feats = neigh_flat.view(b_samples, N, -1).unsqueeze(2)  # (B,N,1,D)
@@ -562,36 +578,87 @@ def build_feature_perturbed_view(
 class MPNN_nk(MessagePassing):
     def __init__(self, in_fea, out_fea, mpnn_layer):
         super().__init__()
+
+        layer_in_dims = [in_fea] + [out_fea] * (mpnn_layer - 1)
+
         self.msg_mlps = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(in_fea, out_fea),
+                nn.Linear(in_dim, out_fea),
                 nn.ReLU(),
-                nn.Linear(out_fea, out_fea)
+                nn.Linear(out_fea, out_fea),
             )
-            for _ in range(mpnn_layer)
+            for in_dim in layer_in_dims
         ])
+
+        self.gate_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_dim * 2 + 1, out_fea),
+                nn.ReLU(),
+                nn.Linear(out_fea, 1),
+            )
+            for in_dim in layer_in_dims
+        ])
+
         self.upd_mlps = nn.ModuleList([
             nn.Sequential(
-            nn.Linear(in_fea+out_fea, out_fea),
-            nn.ReLU(),
-            nn.Linear(out_fea, out_fea),
+                nn.Linear(in_dim + out_fea, out_fea),
+                nn.ReLU(),
+                nn.Linear(out_fea, out_fea),
             )
+            for in_dim in layer_in_dims
+        ])
+
+        self.res_projs = nn.ModuleList([
+            nn.Linear(in_dim, out_fea) if in_dim != out_fea else nn.Identity()
+            for in_dim in layer_in_dims
+        ])
+
+        self.global_proj = (
+            nn.Linear(in_fea, out_fea)
+            if in_fea != out_fea
+            else nn.Identity()
+        )
+
+        self.norms = nn.ModuleList([
+            nn.LayerNorm(out_fea)
             for _ in range(mpnn_layer)
         ])
 
-        # 残差投影（防止维度不一致）
-        if in_fea != out_fea:
-            self.res_proj = nn.Linear(in_fea, out_fea)
-        else:
-            self.res_proj = nn.Identity()
-
     def forward(self, x, edge_index, edge_weight):
-        for msg_mlp, upd_mlp in zip(self.msg_mlps, self.upd_mlps):
-            identity = self.res_proj(x)
-            m = self.propagate(edge_index, x=x, edge_weight=edge_weight, msg_mlp=msg_mlp)
+        x0 = self.global_proj(x)
+        for msg_mlp, gate_mlp, upd_mlp, res_proj, norm in zip(
+            self.msg_mlps,
+            self.gate_mlps,
+            self.upd_mlps,
+            self.res_projs,
+            self.norms
+        ):
+            identity = res_proj(x)
+
+            m = self.propagate(
+                edge_index,
+                x=x,
+                edge_weight=edge_weight,
+                msg_mlp=msg_mlp,
+                gate_mlp=gate_mlp,
+            )
+
             out = upd_mlp(torch.cat([x, m], dim=-1))
-            x = out + identity
+            x =  out + identity
+
+        # x = x + x0
         return x
 
-    def message(self, x_j, edge_weight, msg_mlp):
-        return msg_mlp(x_j) * edge_weight.unsqueeze(-1)
+    def message(self, x_i, x_j, edge_weight, msg_mlp, gate_mlp):
+        edge_weight = edge_weight.unsqueeze(-1)
+
+        gate_input = torch.cat(
+            [x_i, x_j, edge_weight],
+            dim=-1,
+        )
+
+        gate = torch.sigmoid(gate_mlp(gate_input))
+
+        msg = msg_mlp(x_j)
+
+        return gate * msg

@@ -43,17 +43,12 @@ class NeuralSparseSparsifier(nn.Module):
     def __init__(self, configs, edge_num, similar_edge, node_dim, edge_dim=0, hidden=128):
         super().__init__()
         in_dim = 2 * configs.hidden_channels + edge_dim
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 1),
-        )
         self.edge_num = configs.edge_num
         self.similar_edge = configs.similar_edge
         # 让 alpha 也变成可学习（可选）
         self.log_alpha = nn.Parameter(torch.log(torch.tensor(0.1, dtype=torch.float32)))
         # 控制自学习边权影响强度
-        self.log_beta = nn.Parameter(torch.log(torch.tensor(1.0, dtype=torch.float32)))
+        self.log_beta = nn.Parameter(torch.log(torch.tensor(configs.log_beta, dtype=torch.float32)))
 
         # 根据一条边两端节点特征，学习这条边的 gate
         # 输入维度 = x_src + x_dst + |x_src-x_dst| + x_src*x_dst + dt + prior_w
@@ -102,6 +97,7 @@ class NeuralSparseSparsifier(nn.Module):
         # 3) 逐边计算时间衰减后的先验边权
         # -------------------------------------------------
         adj_raw = Adj[b_idx, src, dst]  # (E,)
+        # prior_w = adj_raw * torch.exp(-alpha * dt)  # (E,)
         prior_w = adj_raw * torch.exp(-alpha * dt)  # (E,)
 
         # 如果 edge_eps 的语义是“衰减后的边权阈值”，在这里再筛一次
@@ -148,6 +144,143 @@ class NeuralSparseSparsifier(nn.Module):
 
         return edge_index_big, edge_weight
 
+
+class TopKNeuralSparseSparsifier(nn.Module):
+    """
+    每个节点仅保留相似度最高的 k 条边，并学习所选边的权重。
+    """
+
+    def __init__(self, configs, hidden=128, temperature=1.0):
+        super().__init__()
+        self.k = configs.top_k
+        self.temperature = temperature
+
+        self.log_alpha = nn.Parameter(
+            torch.log(torch.tensor(0.1, dtype=torch.float32))
+        )
+        self.log_beta = nn.Parameter(
+            torch.log(torch.tensor(1.0, dtype=torch.float32))
+        )
+
+        # x_src, x_dst, |x_src-x_dst|, x_src*x_dst, dt, similarity
+        self.edge_mlp = nn.Seuential(
+            nn.Linear(4 * configs.hidden_channels + 2, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+
+    def forward(self, X, Adj, num_nodes, self_loop=False):
+        """
+        Args:
+            X: (B, M, D)，M=T*N
+            Adj: (B, M, M)，节点相似度矩阵
+            num_nodes: 每个时间步的节点数 N
+            self_loop: 是否允许自环
+
+        Returns:
+            edge_index: (2, B*M*k)
+            edge_weight: (B*M*k,)
+        """
+        B, M, D = X.shape
+        device = X.device
+
+        if Adj.shape != (B, M, M):
+            raise ValueError(
+                f"Adj shape应为 {(B, M, M)}，实际为 {tuple(Adj.shape)}"
+            )
+
+        max_k = M if self_loop else M - 1
+        k = min(self.k, max_k)
+
+        if k <= 0:
+            return (
+                torch.empty(2, 0, dtype=torch.long, device=device),
+                torch.empty(0, dtype=X.dtype, device=device)
+            )
+
+        similarity = Adj.clone()
+
+        if not self_loop:
+            diagonal = torch.eye(
+                M, dtype=torch.bool, device=device
+            ).unsqueeze(0)
+            similarity = similarity.masked_fill(diagonal, float("-inf"))
+
+        # 每个节点选择最相似的 k 个节点
+        topk_sim, topk_dst = torch.topk(
+            similarity,
+            k=k,
+            dim=-1,
+            largest=True,
+            sorted=True
+        )
+
+        batch_idx = torch.arange(
+            B, device=device
+        )[:, None, None].expand(B, M, k)
+
+        src_idx = torch.arange(
+            M, device=device
+        )[None, :, None].expand(B, M, k)
+
+        x_src = X[batch_idx, src_idx]      # (B,M,k,D)
+        x_dst = X[batch_idx, topk_dst]     # (B,M,k,D)
+
+        # 时间距离
+        t_src = torch.div(
+            src_idx, num_nodes, rounding_mode="floor"
+        )
+        t_dst = torch.div(
+            topk_dst, num_nodes, rounding_mode="floor"
+        )
+        dt = torch.abs(t_src - t_dst).to(X.dtype)
+
+        edge_features = torch.cat(
+            [
+                x_src,
+                x_dst,
+                torch.abs(x_src - x_dst),
+                x_src * x_dst,
+                dt.unsqueeze(-1),
+                topk_sim.unsqueeze(-1)
+            ],
+            dim=-1
+        )
+
+        learned_logits = self.edge_mlp(
+            edge_features
+        ).squeeze(-1)
+
+        alpha = self.log_alpha.exp()
+        beta = self.log_beta.exp()
+
+        # 相似度先验 + 时间衰减 + 可学习边权
+        prior_logits = (
+            topk_sim / self.temperature
+            - alpha * dt
+        )
+
+        edge_logits = prior_logits + beta * learned_logits
+
+        # 每个节点的 k 条边权重和为 1
+        edge_weight = fun.softmax(edge_logits, dim=-1)
+
+        # 转成批量大图编号
+        offsets = (
+            torch.arange(B, device=device) * M
+        )[:, None, None]
+
+        src_big = (src_idx + offsets).reshape(-1)
+        dst_big = (topk_dst + offsets).reshape(-1)
+
+        edge_index = torch.stack(
+            [src_big, dst_big],
+            dim=0
+        ).long()
+
+        return edge_index, edge_weight.reshape(-1)
 
 class NeuralSparseSparsifier_Mul(nn.Module):
 

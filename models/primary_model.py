@@ -10,8 +10,9 @@ from models.Construction_anchor import AnchorRouter, SparseHBuilder
 from models.Fre_GraphCont import FreqGraphEncoder
 from models.GraphMamba import GraphMambaGMN, BidirectionalMamba
 from models.Graph_GNN import GraphGNN
-from models.Graph_construction import Feature_extractor_1DCNN_Tiny, Dot_Graph_Construction, Conv_GraphST, Mask_Matrix, \
+from models.Graph_construction import Feature_extractor_1DCNN_Tiny, Dot_Graph_Construction, TopKNeuralSparseSparsifier, Mask_Matrix, \
     NeuralSparseSparsifier, Dot_Graph_Construction_weights, NeuralSparseSparsifier_Mul
+from models.Mamba_CNN import NodeTemporalConv
 from models.augmentation import contrastive_loss, disturbance_correlations_edge_index, \
     augment_with_adaptive_shift
 from torch.utils.checkpoint import checkpoint
@@ -34,22 +35,32 @@ class Base_model(nn.Module):
         self.time_length = configs.convo_time_length
         self.Time_Graph_contrustion = Feature_extractor_1DCNN_Tiny(configs.window_size, 32, configs.hidden_channels,
                                                                    configs.kernel_size, configs.stride, configs.dropout)
+        self.Time_embed = Feature_extractor_1DCNN_Tiny(configs.window_size, 32, configs.hidden_channels,
+                                                                   configs.kernel_size, configs.stride, configs.dropout)
         self.sparseEdge = NeuralSparseSparsifier(configs, configs.edge_num, configs.similar_edge, configs.hidden_channels)
+        self.topkEdge = TopKNeuralSparseSparsifier(configs, configs.hidden_channels)
         self.Graph_Mamba = GraphMambaGMN(configs, args)
         self.imdiscover = GraphGNN(configs, args)
 
         self.graph_weight = Dot_Graph_Construction_weights(configs.hidden_channels)
         # self.Fre_graph = FreqGraphEncoder(10, configs.num_nodes, configs.hidden_channels, args, 10, 10)
-        self.logits = nn.Linear(64 * configs.num_nodes, configs.num_classes)
+        self.logits = nn.Linear(configs.dimension_token * configs.num_nodes, configs.num_classes)
         self.seed = args.seed
         self.device = device
 
+        self.cnn_branch = NodeTemporalConv(
+            hidden_channels=configs.hidden_channels,
+            d_model=configs.dimension_token,
+            num_nodes=configs.num_nodes,
+            kernel_size=3,
+        )
+
         self.supcon_head = nn.Sequential(
-            nn.Linear(64 * configs.num_nodes, 256),
+            nn.Linear(configs.dimension_token * configs.num_nodes, 256),
             nn.ReLU(inplace=True),
             nn.Linear(256, 128),
         )
-        self.supcon_weight = getattr(configs, "supcon_weight", 0.5)
+        self.supcon_weight = getattr(configs, "supcon_weight", configs.supcon_weight)
         self.supcon_temperature = getattr(configs, "supcon_temperature", 0.2)
 
     def forward(self, data, labels=None, num_remain=None):
@@ -61,7 +72,9 @@ class Base_model(nn.Module):
         data = self.nonlin_map(data)
         TS_input = torch.transpose(data, 1, 2) # (b_samples, num_nodes, dimension, time_length)
         TS_output = self.Time_Graph_contrustion(TS_input)  # size is (b_samples,  num_nodes * dimension, tlen)
+        cnn_features = self.Time_embed(TS_input)
         TS_output = torch.transpose(TS_output, 1, 2)  # size is (b_samples, tlen, num_nodes * dimension)
+        cnn_features = torch.transpose(cnn_features, 1, 2)  # size is (b_samples, tlen, num_nodes * dimension)
         z1 = TS_output.reshape(-1, TS_output.size(-1))
 
         # print(datetime.now(), "节点嵌入完成")
@@ -77,11 +90,13 @@ class Base_model(nn.Module):
         # loss_cl = contrastive_loss(z1,z2)
         loss_cl = data.new_zeros(())
         GC_input = torch.reshape(TS_output, [b_samples, -1, num_nodes, self.hidden_dim])  # size is (b_samples, tlen, num_nodes, dimension)
+        cnn_features = torch.reshape(cnn_features, [b_samples, -1, num_nodes, self.hidden_dim])
         # Gc_fre, Edge_n, Edge_w = self.Fre_graph(GC_input)
 
 
         # GC_input = torch.reshape(GC_input, [-1, num_nodes, self.hidden_dim])  # size is (b_samples * tlen, num_nodes, dimension)
         GC_input = torch.reshape(GC_input, [b_samples, -1, self.hidden_dim])  # size is (b_samples, tlen * num_nodes, dimension)
+        cnn_features = torch.reshape(cnn_features, [b_samples, -1, self.hidden_dim])  # size is (b_samples, tlen * num_nodes, dimension)
         # print(datetime.now(), "构建时间戳图开始")
         Adj_input = Dot_Graph_Construction(GC_input, self.device)
         # Adj_input = self.graph_weight(GC_input)
@@ -90,7 +105,9 @@ class Base_model(nn.Module):
 
         # GC_input = torch.reshape(GC_input, [-1, num_nodes, self.hidden_dim])
         GC_input = torch.reshape(GC_input, [b_samples, -1, self.hidden_dim])
+        cnn_features = torch.reshape(cnn_features, [b_samples, -1, self.hidden_dim])
         Adj_output, Adj_weight = self.sparseEdge(GC_input, Adj_input, num_nodes)
+        Adj_topk, Adj_k_weight = self.topkEdge(GC_input, Adj_input, num_nodes)
 
         # self.imdiscover(GC_input, Adj_output, Adj_weight)
         # Adj_input = disturbance_correlations_edge_index(Adj_input, 10)
@@ -100,7 +117,7 @@ class Base_model(nn.Module):
         # GC_output = self.Graph_Mamba(Gc_fre, Edge_n, Edge_w)
         # for i in range(0, 6):
         #     GC_output, _ = self.Graph_Mamba(GC_output, Adj_output, Adj_weight, Adj_input)
-        GC_output, graph_loss = self.Graph_Mamba(GC_input, Adj_output, Adj_weight, Adj_input)
+        GC_output, graph_loss = self.Graph_Mamba(cnn_features, Adj_output, Adj_weight, Adj_input, Adj_topk, Adj_k_weight)
         logits_input = torch.reshape(GC_output, [b_samples, -1])
         # logits_input = GC_output.mean(dim=1)
         # print(datetime.now(), "mamba提取完成")
