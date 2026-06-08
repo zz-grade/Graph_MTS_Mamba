@@ -24,7 +24,7 @@ parser.add_argument('--run_description', default='run1', type=str,
 parser.add_argument('--seed', default=0, type=int,
                     help='seed value')
 parser.add_argument('--training_mode', default='train_linear', type=str)
-parser.add_argument('--selected_dataset', default='FaceDetection', type=str)
+parser.add_argument('--selected_dataset', default='FingerMovements', type=str)
 parser.add_argument('--logs_save_dir', default='experiments_logs', type=str,
                     help='saving directory')
 parser.add_argument('--device', default='cuda', type=str,
@@ -96,7 +96,7 @@ def main(configs, args):
                                       training_mode + f"_seed_{SEED}")
     os.makedirs(experiment_log_dir, exist_ok=True)
 
-    log_file_name = os.path.join(experiment_log_dir, f"logs_{datetime.now().strftime('%d_%m')}_Face_two.log")
+    log_file_name = os.path.join(experiment_log_dir, f"logs_{datetime.now().strftime('%d_%m')}_FingerMovements.log")
     logger = _logger(log_file_name)
     logger.debug("=" * 45)
     logger.debug(f'Dataset: {args.selected_dataset}')

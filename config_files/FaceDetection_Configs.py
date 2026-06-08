@@ -36,13 +36,13 @@ class Config(object):
         # self.features_len = 18
 
         # training configs
-        self.num_epoch = 6
+        self.num_epoch = 15
 
         # optimizer parameters
         self.beta1 = 0.9
         self.beta2 = 0.99
-        self.lr = 5e-4
-        self.weight_decay = 3e-4
+        self.lr = 1e-3
+        self.weight_decay = 1e-3
 
         # data parameters
         self.drop_last = False
@@ -52,7 +52,7 @@ class Config(object):
         self.Context_Cont = Context_Cont_configs()
         self.augmentation = augmentations()
 
-        self.dimension_token = 128
+        self.dimension_token = 64
         self.dimension_state = 64
         self.dimension_conv = 4
         self.expand = 2
@@ -71,11 +71,13 @@ class Config(object):
         self.decay_rate = 0.7
 
         self.mpnn_layer = 5
-        self.top_k = 5
-        self.epsilon = 20
+        self.top_k = 8
+        self.epsilon = 50
         self.log_beta = 3.0
-        self.supcon_weight = 0.3
-        self.graph_mode = "none"
+        self.supcon_weight = 0.0
+        self.compare_weight = 0.2
+        self.similarity_threshold = 0.3
+        self.graph_mode = "true"
         self.edge_num = 8
         self.mpnn_message_scales = None
         self.similar_edge = 3

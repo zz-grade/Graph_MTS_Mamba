@@ -40,7 +40,7 @@ class transformer_construction(nn.Module):
 
 class NeuralSparseSparsifier(nn.Module):
 
-    def __init__(self, configs, edge_num, similar_edge, node_dim, edge_dim=0, hidden=128):
+    def __init__(self, configs, similarity_threshold, similar_edge, node_dim, edge_dim=0, hidden=128):
         super().__init__()
         in_dim = 2 * configs.hidden_channels + edge_dim
         self.edge_num = configs.edge_num
@@ -49,6 +49,8 @@ class NeuralSparseSparsifier(nn.Module):
         self.log_alpha = nn.Parameter(torch.log(torch.tensor(0.1, dtype=torch.float32)))
         # 控制自学习边权影响强度
         self.log_beta = nn.Parameter(torch.log(torch.tensor(configs.log_beta, dtype=torch.float32)))
+        self.similarity_threshold = similarity_threshold
+
 
         # 根据一条边两端节点特征，学习这条边的 gate
         # 输入维度 = x_src + x_dst + |x_src-x_dst| + x_src*x_dst + dt + prior_w
@@ -73,6 +75,9 @@ class NeuralSparseSparsifier(nn.Module):
 
         alpha = self.log_alpha.exp()
         beta = self.log_beta.exp()
+
+        threshold = self.similarity_threshold
+
 
         # -------------------------------------------------
         # 1) 先从原始 Adj 取候选边，不构造完整 time_dist / Adj_decay
@@ -145,6 +150,127 @@ class NeuralSparseSparsifier(nn.Module):
         return edge_index_big, edge_weight
 
 
+
+
+class ThresholdNeuralSparseSparsifier(nn.Module):
+    """
+    根据相似度阈值保留候选边，但最终边权完全由 MLP 学习。
+
+    X:   [B, M, D]
+    Adj: [B, M, M]
+    """
+
+    def __init__(self, configs, similarity_threshold, edge_dim=0, hidden=128):
+        super().__init__()
+        in_dim = 2 * configs.hidden_channels + edge_dim
+        self.edge_num = configs.edge_num
+        self.similar_edge = configs.similar_edge
+        # 让 alpha 也变成可学习（可选）
+        self.log_alpha = nn.Parameter(torch.log(torch.tensor(0.1, dtype=torch.float32)))
+        # 控制自学习边权影响强度
+        self.log_beta = nn.Parameter(torch.log(torch.tensor(configs.log_beta, dtype=torch.float32)))
+        self.similarity_threshold = similarity_threshold
+
+        # 根据一条边两端节点特征，学习这条边的 gate
+        # 输入维度 = x_src + x_dst + |x_src-x_dst| + x_src*x_dst + dt + prior_w
+        #         = 4*D + 2
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(configs.hidden_channels * 4 + 2, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+
+    def forward(self, X, Adj, num_nodes, self_loop=False, edge_eps=0.0):
+        """
+        X:   (B, T*N, D)
+        Adj: (B, T*N, T*N)
+        num_nodes: 每个时间步的节点数 N
+        """
+        b_samples, total_nodes, feat_dim = X.shape
+        device = X.device
+
+        assert num_nodes is not None
+        assert total_nodes % num_nodes == 0
+
+        alpha = self.log_alpha.exp()
+        beta = self.log_beta.exp()
+
+        threshold = self.similarity_threshold
+
+
+        # -------------------------------------------------
+        # 1) 先从原始 Adj 取候选边，不构造完整 time_dist / Adj_decay
+        # -------------------------------------------------
+        if self_loop:
+            edge_mask = Adj > threshold
+        else:
+            edge_mask = Adj > threshold
+            diag_mask = ~torch.eye(total_nodes, device=device, dtype=torch.bool).unsqueeze(0)
+            edge_mask = edge_mask & diag_mask
+
+        b_idx, src, dst = edge_mask.nonzero(as_tuple=True)  # (E,)
+
+        # -------------------------------------------------
+        # 2) 逐边计算时间差 dt，而不是构造 (TN, TN) 的 time_dist
+        # -------------------------------------------------
+        t_src = torch.div(src, num_nodes, rounding_mode='floor')
+        t_dst = torch.div(dst, num_nodes, rounding_mode='floor')
+        dt = (t_src - t_dst).abs().to(X.dtype)  # (E,)
+
+        # -------------------------------------------------
+        # 3) 逐边计算时间衰减后的先验边权
+        # -------------------------------------------------
+        adj_raw = Adj[b_idx, src, dst]  # (E,)
+        # prior_w = adj_raw * torch.exp(-alpha * dt)  # (E,)
+        prior_w = adj_raw * torch.exp(-alpha * dt)  # (E,)
+
+        # 如果 edge_eps 的语义是“衰减后的边权阈值”，在这里再筛一次
+        if edge_eps > 0:
+            keep = prior_w > edge_eps
+            b_idx = b_idx[keep]
+            src = src[keep]
+            dst = dst[keep]
+            dt = dt[keep]
+            prior_w = prior_w[keep]
+
+        # -------------------------------------------------
+        # 4) batched graph -> 大图编号
+        # -------------------------------------------------
+        offset = b_idx * total_nodes
+        src_big = src + offset
+        dst_big = dst + offset
+        edge_index_big = torch.stack([src_big, dst_big], dim=0).long()
+
+        # -------------------------------------------------
+        # 5) 逐边取节点特征
+        # -------------------------------------------------
+        x_src = X[b_idx, src]  # (E, D)
+        x_dst = X[b_idx, dst]  # (E, D)
+
+        # -------------------------------------------------
+        # 6) 自学习边权
+        # -------------------------------------------------
+        dt_feat = dt.unsqueeze(-1)  # (E, 1)
+        prior_feat = prior_w.unsqueeze(-1)  # (E, 1)
+
+        edge_feat = torch.cat([
+            x_src,
+            x_dst,
+            torch.abs(x_src - x_dst),
+            x_src * x_dst,
+            dt_feat,
+            prior_feat
+        ], dim=-1)  # (E, 4D+2)
+
+        learned_logit = self.edge_mlp(edge_feat).squeeze(-1)
+        learned_gate = beta * torch.sigmoid(learned_logit)
+        edge_weight = learned_gate
+
+        return edge_index_big, edge_weight
+
+
+
+
 class TopKNeuralSparseSparsifier(nn.Module):
     """
     每个节点仅保留相似度最高的 k 条边，并学习所选边的权重。
@@ -163,7 +289,7 @@ class TopKNeuralSparseSparsifier(nn.Module):
         )
 
         # x_src, x_dst, |x_src-x_dst|, x_src*x_dst, dt, similarity
-        self.edge_mlp = nn.Seuential(
+        self.edge_mlp = nn.Sequential(
             nn.Linear(4 * configs.hidden_channels + 2, hidden),
             nn.ReLU(),
             nn.Linear(hidden, hidden),

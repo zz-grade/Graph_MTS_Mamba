@@ -45,8 +45,8 @@ class Config(object):
 
         # data parameters
         self.drop_last = False
-        self.batch_size = 64
-        self.batch_size_test = 64
+        self.batch_size = 4
+        self.batch_size_test = 4
 
         self.Context_Cont = Context_Cont_configs()
         self.augmentation = augmentations()
@@ -69,12 +69,18 @@ class Config(object):
 
         self.decay_rate = 0.7
 
-        self.mpnn_layer = 1
+        self.mpnn_layer = 5
+        self.top_k = 8
+        self.epsilon = 50
         self.log_beta = 3.0
-        self.supcon_weight = 0.3
-        self.epsilon = 20
-        self.edge_num = 5
-        self.similar_edge = 1
+        self.supcon_weight = 0.0
+        self.compare_weight = 0.2
+        self.similarity_threshold = 0.3
+        self.graph_mode = "true"
+        self.edge_num = 8
+        self.mpnn_message_scales = None
+        self.similar_edge = 3
+        self.random_edge = 8
 
 
 class augmentations(object):

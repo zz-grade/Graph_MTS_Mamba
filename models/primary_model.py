@@ -10,8 +10,10 @@ from models.Construction_anchor import AnchorRouter, SparseHBuilder
 from models.Fre_GraphCont import FreqGraphEncoder
 from models.GraphMamba import GraphMambaGMN, BidirectionalMamba
 from models.Graph_GNN import GraphGNN
-from models.Graph_construction import Feature_extractor_1DCNN_Tiny, Dot_Graph_Construction, TopKNeuralSparseSparsifier, Mask_Matrix, \
-    NeuralSparseSparsifier, Dot_Graph_Construction_weights, NeuralSparseSparsifier_Mul
+from models.Graph_construction import Feature_extractor_1DCNN_Tiny, Dot_Graph_Construction, TopKNeuralSparseSparsifier, \
+    Mask_Matrix, \
+    NeuralSparseSparsifier, Dot_Graph_Construction_weights, NeuralSparseSparsifier_Mul, \
+    ThresholdNeuralSparseSparsifier
 from models.Mamba_CNN import NodeTemporalConv
 from models.augmentation import contrastive_loss, disturbance_correlations_edge_index, \
     augment_with_adaptive_shift
@@ -37,7 +39,8 @@ class Base_model(nn.Module):
                                                                    configs.kernel_size, configs.stride, configs.dropout)
         self.Time_embed = Feature_extractor_1DCNN_Tiny(configs.window_size, 32, configs.hidden_channels,
                                                                    configs.kernel_size, configs.stride, configs.dropout)
-        self.sparseEdge = NeuralSparseSparsifier(configs, configs.edge_num, configs.similar_edge, configs.hidden_channels)
+        self.sparseEdge = NeuralSparseSparsifier(configs, configs.similarity_threshold, configs.similar_edge, configs.hidden_channels)
+        self.sparseEdge_the = ThresholdNeuralSparseSparsifier(configs, configs.similarity_threshold)
         self.topkEdge = TopKNeuralSparseSparsifier(configs, configs.hidden_channels)
         self.Graph_Mamba = GraphMambaGMN(configs, args)
         self.imdiscover = GraphGNN(configs, args)
@@ -61,6 +64,7 @@ class Base_model(nn.Module):
             nn.Linear(256, 128),
         )
         self.supcon_weight = getattr(configs, "supcon_weight", configs.supcon_weight)
+        self.compare_weight = getattr(configs, "compare_weight", configs.compare_weight)
         self.supcon_temperature = getattr(configs, "supcon_temperature", 0.2)
 
     def forward(self, data, labels=None, num_remain=None):
@@ -107,7 +111,7 @@ class Base_model(nn.Module):
         GC_input = torch.reshape(GC_input, [b_samples, -1, self.hidden_dim])
         cnn_features = torch.reshape(cnn_features, [b_samples, -1, self.hidden_dim])
         Adj_output, Adj_weight = self.sparseEdge(GC_input, Adj_input, num_nodes)
-        Adj_topk, Adj_k_weight = self.topkEdge(GC_input, Adj_input, num_nodes)
+        Adj_topk, Adj_k_weight = self.sparseEdge_the(GC_input, Adj_input, num_nodes)
 
         # self.imdiscover(GC_input, Adj_output, Adj_weight)
         # Adj_input = disturbance_correlations_edge_index(Adj_input, 10)
@@ -117,7 +121,7 @@ class Base_model(nn.Module):
         # GC_output = self.Graph_Mamba(Gc_fre, Edge_n, Edge_w)
         # for i in range(0, 6):
         #     GC_output, _ = self.Graph_Mamba(GC_output, Adj_output, Adj_weight, Adj_input)
-        GC_output, graph_loss = self.Graph_Mamba(cnn_features, Adj_output, Adj_weight, Adj_input, Adj_topk, Adj_k_weight)
+        GC_output, graph_loss = self.Graph_Mamba(GC_input, Adj_output, Adj_weight, Adj_input, Adj_topk, Adj_k_weight)
         logits_input = torch.reshape(GC_output, [b_samples, -1])
         # logits_input = GC_output.mean(dim=1)
         # print(datetime.now(), "mamba提取完成")
@@ -128,10 +132,10 @@ class Base_model(nn.Module):
             supcon_loss = supervised_contrastive_loss(
                 z, labels, temperature=self.supcon_temperature
             )
-            loss_cl = supcon_loss
+            loss_cl = self.supcon_weight * supcon_loss
 
         if torch.is_tensor(graph_loss):
-            loss_cl = loss_cl + graph_loss
+            loss_cl = loss_cl + self.compare_weight * graph_loss
         return logits, loss_cl
 
 

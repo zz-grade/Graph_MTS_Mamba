@@ -15,6 +15,7 @@ from torch_geometric.datasets import KarateClub
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import degree
 
+from models.Compare_learn import NodeTokenContrastiveLoss
 from models.augmentation import build_topk_neighbor_mask
 
 
@@ -38,6 +39,7 @@ class GraphMambaGMN(nn.Module):
         ])
         if configs.use_mpnn:
             self.mpnn = MPNN_nk(configs.hidden_channels, d_model, configs.mpnn_layer)
+            self.mpnn2 = MPNN_nk(configs.hidden_channels, d_model, configs.mpnn_layer)
         else:
             self.mpnn = None
 
@@ -73,6 +75,12 @@ class GraphMambaGMN(nn.Module):
             nn.Linear(configs.hidden_channels, d_model),
             nn.LayerNorm(d_model),
             nn.ReLU()
+        )
+
+        self.node_token_contrast = NodeTokenContrastiveLoss(
+            input_dim=configs.dimension_token,
+            projection_dim=configs.hidden_channels,
+            temperature=0.2,
         )
 
     def run_global_mamba_time_split(self, h_in, T_len, num):
@@ -156,45 +164,14 @@ class GraphMambaGMN(nn.Module):
         edge_index_list = []
         # print(datetime.now(), "mamba训练开始")
         # print(b_samples, "每批次样本数")
-        node_token_feats, perm_batch, inv_perm_batch, edge_index_big = self.Graph_del(x, edge_index_big, edge_weight_big, b_samples, num_node, device)
-        node_token_feat_topk, _, _, _ = self.Graph_del(x, Adj_topk, Adj_k_weight, b_samples, num_node, device)
+        node_token_feats, perm_batch, inv_perm_batch, edge_index_big = self.Graph_del(x, edge_index_big, edge_weight_big, b_samples, 1, device)
+        node_token_feat_topk, _, _, _ = self.Graph_del(x, Adj_topk, Adj_k_weight, b_samples, 0, device)
         # node_token_feats = self.gnn_pre(x,edge_index_big,adj)
         # print(datetime.now(), "子图构建及编码完成")
 
         b_samples, _, _, dimension = node_token_feats.size()
 
-        # # 你需要提供/保存 N 和 F（freq bins）
-        # # N = num_nodes (传感器数)
-        # # F = freq bins (rfft 后频点数 or keep_low_freq)
-        # N = 144
-        # F = 17
-        #
-        # # [B, M, D] -> [B, N, F, D]
-        # x_nf = node_token_feats.view(b_samples, N, F, dimension)
-        #
-        # # ========== 1) “频率片内”：节点编码（沿 N 维）==========
-        # # (B, N, F, D) -> (B*F, N, D)
-        # x_intra = x_nf.permute(0, 2, 1, 3).contiguous().view(b_samples * F, N, dimension)
-        # for layer in self.local_mamba:
-        #     x_intra = layer(x_intra)  # (B*F, N, D)
-        #
-        # # 回到 (B, N, F, D)
-        # x_intra = x_intra.view(b_samples, F, N, dimension).permute(0, 2, 1, 3).contiguous()
-        #
-        # # ========== 2) 排序（如果你仍然要按 perm 排节点序）==========
-        # # perm_batch: [B, N] —— 仍然只对“传感器节点维 N”排序
-        # # perm_expanded = perm_batch.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, F, dimension)  # (B,N,F,D)
-        # # x_sorted = torch.gather(x_intra, 1, perm_expanded.to(x_intra.device))  # (B,N,F,D)
-        #
-        # # ========== 3) 全局：跨“频率 token” mamba（沿 F 维）==========
-        # # (B,N,F,D) -> (B*N, F, D)
-        # h_freq = x_intra.view(b_samples * N, F, dimension)
-        # for layer in self.global_mamba:
-        #     h_freq = layer(h_freq)  # (B*N, F, D)
-        #
-        # # 取最后一个频率 token（也可以改成 mean/max/attention）
-        # node_repr_all = h_freq[:, -1, :]  # (B*N, D)
-        # node_repr_global_1 = node_repr_all.view(b_samples, N, dimension)  # (B,N,D)
+
         # ========== 1) 时间片内：节点编码（沿 N 维）==========
         # (B, N, L, D) -> (B*L, N, D)
         x_intra = node_token_feats.permute(0, 2, 1, 3).contiguous().view(b_samples * L, -1, dimension)
@@ -205,15 +182,6 @@ class GraphMambaGMN(nn.Module):
         # 回到 (B, N, L, D)
         x_intra = x_intra.view(b_samples, L, -1, dimension).permute(0, 2, 1, 3).contiguous()
 
-        # ========== 2) 排序（如果你仍然要按 perm 排节点序）==========
-        # perm_expanded = perm_batch.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, L, dimension)  # (B,N,L,D)
-        # x_sorted = torch.gather(x_intra, 1, perm_expanded.to(device))  # (B,N,L,D)
-
-        # x_intra: (B, N, L, D)
-        # 先把每个节点在时间上做个summary用于打分（比如取最后时刻或均值）
-        # node_summary = x_intra.mean(dim=2)  # (B, N, D)
-
-        # X_super, A_pool, S, aux_lossn = self.pool_nn(x_intra, adj)
 
         # ========== 3) 全局：跨时间 mamba（沿 L 维）==========
         # (B,N,L,D) -> (B*N, L, D)
@@ -223,11 +191,32 @@ class GraphMambaGMN(nn.Module):
         node_repr_all = h_time[:, -1, :]  # (B*N, D)
         node_repr_global_1 = node_repr_all.view(b_samples, num_node, dimension)  # (B,N,D)
 
+
         # node_repr_global_2 = build_feature_perturbed_view(node_repr_global_1,0.05, 0.002)
+
+        x_intra_k = node_token_feat_topk.permute(0, 2, 1, 3).contiguous().view(b_samples * L, -1, dimension)
+        # x_intra = node_token_feats
+        for layer in self.local_mamba:  # 你需要新加这个模块列表
+            x_intra_k = layer(x_intra_k)  # 仍是 (B*L, N, D)
+
+        # 回到 (B, N, L, D)
+        x_intra_k = x_intra_k.view(b_samples, L, -1, dimension).permute(0, 2, 1, 3).contiguous()
+
+        # ========== 3) 全局：跨时间 mamba（沿 L 维）==========
+        # (B,N,L,D) -> (B*N, L, D)
+        h_time_k = x_intra_k.view(b_samples * num_node, L, dimension)
+        for layer in self.global_mamba:
+            h_time_k = layer(h_time_k)  # (B*N, L, D)
+        node_repr_all_k = h_time_k[:, -1, :]  # (B*N, D)
+        node_repr_global_k = node_repr_all_k.view(b_samples, num_node, dimension)  # (B,N,D)
+
 
 
         # print(datetime.now(), "对比学习开始")
-        z = build_feature_perturbed_view(node_repr_global_1)
+        token_contrastive_loss = self.node_token_contrast(
+            node_repr_global_1,
+            node_repr_global_k,
+        )
         # # print("对比学习之前", torch.cuda.memory_allocated() / 1024 ** 3, "GB")
         z1 = self.proj(node_repr_global_1)  # (B,N,Dproj)
         z2 = self.proj(node_repr_global_1)  # (B,N,Dproj)
@@ -247,7 +236,7 @@ class GraphMambaGMN(nn.Module):
         # loss_con = node_info_nce_cross_graph_only(z2, z1)
         # print(datetime.now(), "对比损失计算完成")
         # print(datetime.now(), "对比学习结束")
-        return node_repr_global_1, loss_cl
+        return node_repr_global_1, token_contrastive_loss
 
     def _merge_edge_index_list(self, edge_index_list_in, b_samples, num_node, device):
         # edge_index_list_in: list长度B，每个是 (2, E_b)
@@ -267,7 +256,7 @@ class GraphMambaGMN(nn.Module):
         return edge_index_big
 
 
-    def Graph_del(self, x, edge_index_big, edge_weight_big, b_samples, num_node, device):
+    def Graph_del(self, x, edge_index_big, edge_weight_big, b_samples, num_mpnn, device):
         # x: (B, N, D)
         x = x.to(device)
         B, N, F = x.shape
@@ -282,11 +271,18 @@ class GraphMambaGMN(nn.Module):
         if self.graph_mode == "none":
             neigh_flat = self.node_encoder(x_flat)
         else:
-            neigh_flat = self.mpnn(
-                x_flat,
-                edge_index_big,
-                edge_weight_big
-            )
+            if num_mpnn:
+                neigh_flat = self.mpnn(
+                    x_flat,
+                    edge_index_big,
+                    edge_weight_big
+                )
+            else:
+                neigh_flat = self.mpnn2(
+                    x_flat,
+                    edge_index_big,
+                    edge_weight_big
+                )
         # 3) 一次跑完 MPNN：输出 (B*N, D)
         # neigh_flat = self.mpnn(x_flat, edge_index_big, edge_weight_big)  # (B*N, D)
 

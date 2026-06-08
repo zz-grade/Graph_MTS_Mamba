@@ -29,7 +29,7 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
     for epoch in range(1, configs.num_epoch + 1):
         # train_sampler.set_epoch(epoch)
         # test_sampler.set_epoch(epoch)
-        loss = model_train(model, model_optimizer, criterion, train_dl, device, epoch, scaler, use_amp)
+        loss = model_train(model, model_optimizer, criterion, train_dl, device, epoch, scaler, use_amp, configs.epsilon)
 
         if epoch % configs.show_interval == 0:
             accu_val = Cross_validation(model, train_dl, device)
@@ -52,7 +52,7 @@ def Trainer(model, model_optimizer, train_dl, test_dl, device, logger, configs, 
     logger.debug("\n################## Training is Done! #########################")
 
 
-def model_train(model, model_optimizer, criterion, train_loader, device, epoch, scaler, use_amp):
+def model_train(model, model_optimizer, criterion, train_loader, device, epoch, scaler, use_amp, epsilon):
     model.train()
     # num = int(len(train_loader.dataset) * 0.8)
     # print("train_loader.dataset", len(train_loader.dataset))
@@ -74,14 +74,14 @@ def model_train(model, model_optimizer, criterion, train_loader, device, epoch, 
             # print("prediction", prediction)
             # print("labels", labels)
             loss_cls = criterion(prediction, labels)
-            loss = loss_cls + 0.4 * loss_xx
+            loss = loss_cls + loss_xx
 
         # print(datetime.now(), "反向传递开始")
         scaler.scale(loss).backward()
         # if epoch>=30:
         #     # 先反缩放
-        scaler.unscale_(model_optimizer)
-        fim_l1, scale = apply_fic_constraint(model, 20)
+        # scaler.unscale_(model_optimizer)
+        # fim_l1, scale = apply_fic_constraint(model, epsilon)
         # print(f"fim_l1={fim_l1:.6f}, scale={scale:.6f}")
         # print(datetime.now(), "反向传递完成")
         scaler.step(model_optimizer)
