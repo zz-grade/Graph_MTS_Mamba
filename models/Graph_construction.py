@@ -707,7 +707,6 @@ class Feature_extractor_1DCNN_Tiny(nn.Module):
         else:
             self.shortcut = nn.Identity()
 
-        self.positional_encoding = PositionalEncoding(num_hidden, 0.1)
 
     def forward(self, x_in):
         # print('input size is {}'.format(x_in.size()))
